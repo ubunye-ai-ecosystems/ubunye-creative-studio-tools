@@ -44,9 +44,8 @@ jobs:
         run: |
           git config user.name  "ubunye-sync[bot]"
           git config user.email "ubunye-sync[bot]@users.noreply.github.com"
-          git remote add upstream "$UPSTREAM_URL"
-          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
-          git fetch upstream 'refs/tags/*:refs/tags/upstream/*'      # namespaced, never clobbers ours
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --tags upstream "$UPSTREAM_BRANCH"               # no --force: an existing tag is never moved
           git fetch origin upstream-main
 
       - name: Compare with last integrated revision

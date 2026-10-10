@@ -60,7 +60,7 @@ Bucket layout and rules:
 | Linux | minisign/GPG signature over `SHA256SUMS`; Flatpak repo GPG key; AppImage embedded signature | key generation ceremony; offline backup |
 | Web | served over HTTPS; Subresource Integrity on the JS loader | — |
 
-New identities (replacing upstream): bundle and app IDs `com.thabangvision.ubunye.light` / `.photo` / `.film` (or `org.ubunye.creative.*`; decide in branding), **new MSI UpgradeCodes** (one stable GUID per app, never reused from upstream), and vendor/manufacturer "Ubunye AI Ecosystems".
+New identities (replacing upstream; approved 2026-10-10): bundle and app IDs `org.ubunye.creative.light` / `.photo` / `.film`, **new MSI UpgradeCodes** (one stable GUID per app, never reused from upstream; see `brand/identities.toml`), and vendor/manufacturer "Ubunye AI Ecosystems".
 
 ## 5. Update delivery and rollback
 

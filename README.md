@@ -34,12 +34,23 @@ No repositories were created. No upstream, Ubunye Engine or ThabangVision code w
 9. **Ubunye Engine** is a Python data and ML pipeline framework with an MCP server. It has no image or video AI today. Integration is agent orchestration over MCP, not linking.
 10. **The ThabangVision repo is private and could not be inspected** in this session. Deployment routes are therefore proposals.
 
-## Decisions needed
+## Decisions (2026-10-10)
 
-1. Approve the **thin-fork** strategy (track upstream; branding through a brand layer) rather than a hard fork.
-2. Approve **mirror-push** repo creation (independent repos, full history, `main` + tags only) instead of GitHub forks.
-3. Approve Ubunye docs under `ubunye/`, with root `UPSTREAM.md` and `UPSTREAM_STATE.json`, to avoid conflicts with upstream's `CLAUDE.md`, `ROADMAP.md` and `SECURITY.md`.
-4. App identifier namespace: `com.thabangvision.ubunye.*` or `org.ubunye.creative.*`, and the vendor legal name for installers.
-5. Sync cadence: daily check plus a rolling PR (proposed), with a weekly merge target.
-6. Start legal review (codecs, trademarks, provenance, model licences) and the signing paperwork (Apple Developer, Azure Trusted Signing).
-7. Grant this session read access to `LeparaLaMapara/thabangvisionaistudios` so the `/studio` integration can be planned against the real code.
+| # | Decision | Status |
+|---|---|---|
+| 1 | **Thin fork**: track upstream; branding goes through a brand layer | ✅ approved |
+| 2 | **Mirror-push** repo creation (independent repos, full history, `main` + tags) | ✅ approved |
+| 3 | Ubunye docs under `ubunye/`, plus root `UPSTREAM.md` and `UPSTREAM_STATE.json`; one-line pointers prepended to upstream `AGENTS.md`/`CLAUDE.md`/`SECURITY.md` | ✅ approved |
+| 4 | Identifier namespace **`org.ubunye.creative.*`**; vendor "Ubunye AI Ecosystems". Canonical IDs and Windows UpgradeCodes are in [`brand/identities.toml`](brand/identities.toml). (Spoken as "org.ubuntu.creative"; we use **ubunye**, since "Ubuntu" is a Canonical trademark.) | ✅ approved |
+| 5 | Sync cadence: **daily check** with one rolling integration PR per app | ✅ approved |
+| 6 | Legal review (codecs, trademarks, provenance, model licences) and signing paperwork | ⏸ deferred by the owner until after the build-out |
+| 7 | Read access to `LeparaLaMapara/thabangvisionaistudios` for the `/studio` work | ⏳ open |
+
+## Milestone 1 status
+
+| Step | Status |
+|---|---|
+| Fork preparation tooling: [`scripts/prepare_fork.py`](scripts/prepare_fork.py), [`fork-overlay/`](fork-overlay/), [`scripts/publish_fork.sh`](scripts/publish_fork.sh) | ✅ built and tested |
+| Local forks prepared with full history (Light 1,552 commits / 6 tags; Photo 1,151 / 8; Film 1,098 / 6), remotes `origin` + `upstream` (push disabled), branches `main`, `upstream-main`, `develop` | ✅ verified: HEAD and tags identical to upstream |
+| Daily sync workflow: simulated locally against real upstream history (clean merge, conflict, history-rewrite paths) | ✅ passes ([details](05-upstream-sync-design.md#7-verification)) |
+| Create GitHub repos in `ubunye-ai-ecosystems` and push | ⛔ **blocked**: GitHub API returned `403 Resource not accessible by integration` for repo creation. A maintainer must create the four empty repos (or grant the Claude GitHub App "Administration: write" on the org), then run `scripts/publish_fork.sh`. |

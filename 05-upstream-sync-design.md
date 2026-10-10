@@ -73,3 +73,16 @@ Schema and example: [`templates/UPSTREAM_STATE.json`](templates/UPSTREAM_STATE.j
 ## 6. Draft workflow
 
 [`templates/upstream-sync.yml`](templates/upstream-sync.yml) is a **draft, inactive** workflow. It is stored outside `.github/workflows/` on purpose. Install it in each app repo only after the repositories exist and the plan is approved.
+
+## 7. Verification
+
+On 2026-10-10 the workflow's `run:` steps ran locally with a minimal runner. Inputs: a bare `origin` (fork imported at LightCraft `5c1dcd4`, one day behind) and the real upstream history up to `b70ae17` (524 commits). `gh` was stubbed.
+
+| Scenario | Expected | Result |
+|---|---|---|
+| Clean merge | `upstream-main` fast-forwarded; merge commit on `integration/upstream` with parents (develop, upstream); `UPSTREAM_STATE.json.pending.status = clean` only on the integration branch; `develop` untouched; PR created with the report | ✅ |
+| Conflict (Ubunye edited a README line that upstream also changed) | merge aborted (no conflict markers committed); conflict list appended to the PR; `pending.status = conflicts`; `README.md` listed as a hotspot | ✅ |
+| Upstream history rewrite (`last_integrated` not an ancestor) | issue opened, job fails, nothing pushed | ✅ |
+| Rerun in the same workspace | idempotent remote setup | ✅ after fix |
+
+Report quality on real data (last 24 hours of each upstream): Light 380 commits (v0.4.0 → v0.5.0, 1 possibly-breaking catalog format bump, 5 security-relevant); Photo 341 (v0.5.0 → v0.6.0); Film 231 (v0.4.0 → v0.5.0). Upstream task-ID prefixes (`LR-IMP-FORMATS:` and so on) are grouped as "commits by area".

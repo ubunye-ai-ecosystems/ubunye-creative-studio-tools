@@ -1,0 +1,31 @@
+# Ubunye identity for {{NAME}}. Single source of truth for Milestone 4 (branding).
+# Values are not wired into the build yet; branding changes start only after brand-kit approval.
+[product]
+name = "{{NAME}}"
+short_name = "{{SHORT}}"
+slug = "{{SLUG}}"
+suite = "Ubunye Creative Studio"
+vendor = "Ubunye AI Ecosystems"
+description = "{{KIND}}"
+based_on = "Based on {{UPNAME}} by the ArtCraft team ({{UPURL}}), used under MIT OR Apache-2.0."
+
+[identifiers]
+app_id = "{{APPID}}"                         # macOS bundle id, Linux app id, Flatpak id
+document_uti = "{{APPID}}.document"
+windows_upgrade_code = "{{UPGRADE}}"         # generated for Ubunye; never reuse upstream's GUID
+env_prefix = "{{ENVPFX}}"                    # replaces upstream's {{UPENV}}_* variables
+config_dir = "{{SLUG}}"
+
+[links]
+homepage = "https://thabangvision.com/studio/{{SHORT_LC}}"
+downloads = "https://downloads.thabangvision.com/{{SHORT_LC}}/"
+web_app = "https://{{SHORT_LC}}.studio.thabangvision.com/"
+source = "https://github.com/ubunye-ai-ecosystems/{{SLUG}}"
+issues = "https://github.com/ubunye-ai-ecosystems/{{SLUG}}/issues"
+update_manifest = "https://downloads.thabangvision.com/manifests/{{SHORT_LC}}/stable.json"
+
+[upstream_identity_to_replace]
+names = ["{{UPNAME}}", "ArtCraft"]
+app_id = "ai.storyteller.{{UP}}"
+vendor = "Learning Machines LLC"
+links = ["getartcraft.com", "discord.gg/artcraft", "github.com/storytold/{{UP}}"]

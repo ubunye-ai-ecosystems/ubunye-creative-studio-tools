@@ -1,0 +1,19 @@
+# Ubunye Creative Studio: canonical product identities (decided 2026-10-10).
+# Namespace org.ubunye.creative.* (approved). Windows UpgradeCodes were generated once for Ubunye
+# and must never change: an UpgradeCode identifies the product across all future versions.
+
+[light]
+name = "Ubunye Creative Light"
+app_id = "org.ubunye.creative.light"
+windows_upgrade_code = "9210D947-FF7A-4C2A-817A-EE355C6A0E4F"
+
+[photo]
+name = "Ubunye Creative Photo"
+app_id = "org.ubunye.creative.photo"
+windows_upgrade_code = "B5F26DFD-A4A7-4D46-8DDF-79537F0A829B"
+
+[film]
+name = "Ubunye Creative Film"
+app_id = "org.ubunye.creative.film"
+windows_upgrade_code = "920776E7-7682-4688-8E8B-B25A5CAB0BF4"
+
