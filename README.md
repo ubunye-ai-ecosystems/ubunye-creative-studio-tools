@@ -56,3 +56,21 @@ No repositories were created. No upstream, Ubunye Engine or ThabangVision code w
 | `cargo deny check` (advisories, licences, sources, bans) with the Ubunye `deny.toml` | ✅ all three pass |
 | Daily sync workflow: simulated locally against real upstream history (clean merge, conflict, history-rewrite paths) | ✅ passes ([details](05-upstream-sync-design.md#7-verification)) |
 | Create GitHub repos in `ubunye-ai-ecosystems` and push | ⛔ **blocked**: GitHub API returned `403 Resource not accessible by integration` for repo creation. A maintainer must create the four empty repos (or grant the Claude GitHub App "Administration: write" on the org), then run `scripts/publish_fork.sh`. |
+
+## How to finish Milestone 1 (once the repo-creation block is fixed)
+
+Run this on any machine with `git`, `python3` (3.11+), `jq` and an authenticated `gh` that has admin rights on `ubunye-ai-ecosystems`:
+
+```bash
+for app in light photo film studio; do
+  gh repo create ubunye-ai-ecosystems/ubunye-creative-$app --private \
+    --description "Ubunye Creative Studio: $app"
+done
+for app in light photo film; do
+  python3 -I scripts/prepare_fork.py $app ./forks       # full-history clone + Ubunye scaffolding on develop
+  scripts/publish_fork.sh ./forks/ubunye-creative-$app  # plain pushes: main, upstream-main, tags, develop
+done
+```
+
+Or grant the Claude GitHub App repository-administration access on the org, and Claude will run these steps.
+After publishing, set the repo variable `UBUNYE_SYNC_APP_ID` and the secret `UBUNYE_SYNC_APP_KEY` (a GitHub App with contents and pull-request write access) so the daily sync PRs trigger CI. Without them, the sync falls back to `GITHUB_TOKEN`.
