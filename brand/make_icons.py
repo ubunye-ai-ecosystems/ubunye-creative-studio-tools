@@ -4,8 +4,9 @@
     python -I brand/make_icons.py
 
 The ThabangVision logo is a camera lens with sun rays sitting on a large serif "B".
-Each app keeps the lens and rays and swaps the B for its own letter (L, P, F).
-The letter is converted to an outline so the SVGs need no installed font.
+Each app keeps the lens and rays and swaps the B for its own mark: a capital U for Ubunye
+plus the app's letter (Ul, Up, Uf). The letters are converted to outlines so the SVGs need no
+installed font.
 Font: DM Serif Display (SIL OFL 1.1, brand/fonts/OFL-DMSerifDisplay.txt).
 Needs fonttools (pip install fonttools). Writes brand/icons/<app>.svg.
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 import math
 import pathlib
 
+from fontTools.pens.boundsPen import BoundsPen
 from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
 from fontTools.ttLib import TTFont
@@ -22,51 +24,63 @@ HERE = pathlib.Path(__file__).resolve().parent
 BG = "#050505"      # ThabangVision background
 LETTER = "#f3ede0"  # warm white, like the logo's B
 APPS = {            # letter, accent (lens and rays)
-    "light": ("L", "#d4a843"),  # ThabangVision gold
-    "photo": ("P", "#e0674a"),  # coral
-    "film": ("F", "#3fae9a"),   # teal
+    "light": ("Ul", "#d4a843"),  # ThabangVision gold
+    "photo": ("Up", "#e0674a"),  # coral
+    "film": ("Uf", "#3fae9a"),   # teal
 }
-LENS = (196.0, 196.0)  # lens centre, top left like the logo
+LENS = (168.0, 168.0)
+K = 0.8  # lens and rays scale  # lens centre, top left like the logo
 
 
-def letter_path(font: TTFont, ch: str) -> str:
+def letter_path(font: TTFont, text: str) -> str:
+    """Outline `text` and fit its real outline into the bottom right box, as the B sits in the logo."""
     glyphs = font.getGlyphSet()
-    name = font.getBestCmap()[ord(ch)]
-    upm = font["head"].unitsPerEm
-    g = glyphs[name]
-    # Scale the cap height to ~330 px and sit the letter bottom right, as the B does in the logo.
-    scale = 430 / upm
+    cmap = font.getBestCmap()
+    names = [cmap[ord(c)] for c in text]
+    # Measure the outline of the whole string in font units.
+    bounds = BoundsPen(glyphs)
+    x = 0
+    for n in names:
+        glyphs[n].draw(TransformPen(bounds, (1, 0, 0, 1, x, 0)))
+        x += glyphs[n].width
+    xmin, ymin, xmax, ymax = bounds.bounds
+    box_w, box_h, right, bottom = 340, 330, 512 - 52, 512 - 48
+    scale = min(box_w / (xmax - xmin), box_h / (ymax - ymin))
+    ox = right - xmax * scale
+    oy = bottom + ymin * scale  # y is flipped: font baseline goes to oy
     pen = SVGPathPen(glyphs)
-    left = 512 - 66 - g.width * scale * 0.92
-    g.draw(TransformPen(pen, (scale, 0, 0, -scale, left, 452)))
+    x = 0
+    for n in names:
+        glyphs[n].draw(TransformPen(pen, (scale, 0, 0, -scale, ox + x * scale, oy)))
+        x += glyphs[n].width
     return pen.getCommands()
 
 
 def lens(accent: str) -> str:
     cx, cy = LENS
-    out = [f'<circle cx="{cx}" cy="{cy}" r="104" fill="{BG}"/>']
+    out = [f'<circle cx="{cx}" cy="{cy}" r="{104*K:.0f}" fill="{BG}"/>']
     # Sun rays fan out over the top and left, alternating long and short like the logo.
     for i, deg in enumerate(range(95, 270, 17)):
         a = math.radians(deg)
-        r1, r2 = 118, (176 if i % 2 == 0 else 150)
+        r1, r2 = 118 * K, (176 if i % 2 == 0 else 150) * K
         x1, y1 = cx + r1 * math.cos(a), cy - r1 * math.sin(a)
         x2, y2 = cx + r2 * math.cos(a), cy - r2 * math.sin(a)
         out.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
-                   f'stroke="{accent}" stroke-width="13" stroke-linecap="round"/>')
-    out.append(f'<circle cx="{cx}" cy="{cy}" r="90" fill="none" stroke="{accent}" stroke-width="16"/>')
-    out.append(f'<circle cx="{cx}" cy="{cy}" r="68" fill="none" stroke="{accent}" stroke-width="7"/>')
+                   f'stroke="{accent}" stroke-width="{13*K:.0f}" stroke-linecap="round"/>')
+    out.append(f'<circle cx="{cx}" cy="{cy}" r="{90*K:.0f}" fill="none" stroke="{accent}" stroke-width="{16*K:.0f}"/>')
+    out.append(f'<circle cx="{cx}" cy="{cy}" r="{68*K:.0f}" fill="none" stroke="{accent}" stroke-width="{7*K:.0f}"/>')
     # Aperture blades: six chords tangent to the pupil ring.
     for k in range(6):
         a = math.radians(k * 60 + 15)
         t = (math.cos(a), math.sin(a))
         n = (-t[1], t[0])
-        px, py = cx + 30 * n[0], cy + 30 * n[1]
-        x1, y1 = px - 58 * t[0], py - 58 * t[1]
-        x2, y2 = px + 8 * t[0], py + 8 * t[1]
+        px, py = cx + 30 * K * n[0], cy + 30 * K * n[1]
+        x1, y1 = px - 58 * K * t[0], py - 58 * K * t[1]
+        x2, y2 = px + 8 * K * t[0], py + 8 * K * t[1]
         out.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
-                   f'stroke="{accent}" stroke-width="6" stroke-linecap="round"/>')
-    out.append(f'<circle cx="{cx}" cy="{cy}" r="26" fill="{accent}"/>')
-    out.append(f'<circle cx="{cx + 9}" cy="{cy - 9}" r="7" fill="{BG}"/>')
+                   f'stroke="{accent}" stroke-width="{6*K:.0f}" stroke-linecap="round"/>')
+    out.append(f'<circle cx="{cx}" cy="{cy}" r="{26*K:.0f}" fill="{accent}"/>')
+    out.append(f'<circle cx="{cx + 9*K:.0f}" cy="{cy - 9*K:.0f}" r="{7*K:.0f}" fill="{BG}"/>')
     return "\n  ".join(out)
 
 
