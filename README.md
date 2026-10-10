@@ -29,7 +29,7 @@ No repositories were created. No upstream, Ubunye Engine or ThabangVision code w
 4. **Attribution gaps already exist upstream.** These include the egui default fonts (Ubuntu Font Licence), Kokoro and CMUdict, 8 PhotoCraft translations, and NOTICE files missing from most packages. We must fix these in our packages.
 5. **Security.** `cargo audit`: PhotoCraft 0 vulnerabilities; LightCraft 7 and FilmCraft 5, mostly through one alpha TLS crate. Tens of thousands of lines of young, unfuzzed parsers handle untrusted media. FilmCraft's and LightCraft's local control ports have no authentication.
 6. **Testing gap.** FilmCraft runs no tests in CI, and LightCraft runs them only on FreeBSD. Our first engineering milestone is a 3-OS CI gate.
-7. **Build verified (partial).** The LightCraft CLI builds on Linux (rustc 1.97, 13 min 41 s on 4 vCPU). It passes a headless **import → edit → save → reopen → export** round trip on the CPU path. Nothing else has been built yet, and **nothing is production-ready.**
+7. **Builds verified (partial).** All three CLIs build on Linux with rustc 1.97 (Light 13 min 41 s, Photo 8 min 44 s, Film 7 min 18 s on 4 vCPU) and pass a headless **import → edit → save → reopen → export** round trip on the CPU path. GUI, Windows, macOS and web are not yet built, and **nothing is production-ready.**
 8. **Legal review is needed** for codec patents (H.264, HEVC, AAC), Adobe feature names in the UI (Lumetri and others), the provenance of AI-generated code, and the licences of downloadable models (SAM 3 non-OSI, RawNIND GPL-3.0).
 9. **Ubunye Engine** is a Python data and ML pipeline framework with an MCP server. It has no image or video AI today. Integration is agent orchestration over MCP, not linking.
 10. **The ThabangVision repo is private and could not be inspected** in this session. Deployment routes are therefore proposals.
@@ -52,5 +52,7 @@ No repositories were created. No upstream, Ubunye Engine or ThabangVision code w
 |---|---|
 | Fork preparation tooling: [`scripts/prepare_fork.py`](scripts/prepare_fork.py), [`fork-overlay/`](fork-overlay/), [`scripts/publish_fork.sh`](scripts/publish_fork.sh) | ✅ built and tested |
 | Local forks prepared with full history (Light 1,552 commits / 6 tags; Photo 1,151 / 8; Film 1,098 / 6), remotes `origin` + `upstream` (push disabled), branches `main`, `upstream-main`, `develop` | ✅ verified: HEAD and tags identical to upstream |
+| Per-app smoke tests (import → edit → save → reopen → export) for Light, Photo and Film CLIs on Linux | ✅ all pass |
+| `cargo deny check` (advisories, licences, sources, bans) with the Ubunye `deny.toml` | ✅ all three pass |
 | Daily sync workflow: simulated locally against real upstream history (clean merge, conflict, history-rewrite paths) | ✅ passes ([details](05-upstream-sync-design.md#7-verification)) |
 | Create GitHub repos in `ubunye-ai-ecosystems` and push | ⛔ **blocked**: GitHub API returned `403 Resource not accessible by integration` for repo creation. A maintainer must create the four empty repos (or grant the Claude GitHub App "Administration: write" on the org), then run `scripts/publish_fork.sh`. |

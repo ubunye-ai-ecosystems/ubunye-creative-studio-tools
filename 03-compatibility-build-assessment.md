@@ -9,15 +9,20 @@
 | Headless smoke test: import a PNG, `develop.set light.exposure=0.7`, save to library, export JPEG, **reopen the library in a new process**, export again | same | ✅ **PASS**: the export after reopen is byte-identical to the edited export and differs from the unedited control export. The library is persisted as `catalog.log` + `catalog.snap` + `catalog.lock`. [VERIFIED] |
 | GPU | same | No Vulkan driver (`vkCreateInstance: Found no drivers!`). wgpu fell back and the export still succeeded on the CPU path. GPU paths are **untested**. [VERIFIED] |
 | `cargo audit` (RustSec DB 2026-10-09) | all three lockfiles | Light 7 vulns, Photo 0, Film 5. Details in `research/shared.md` §4. [VERIFIED] |
-| PhotoCraft and FilmCraft builds; desktop GUI apps; Windows; macOS; wasm | — | **not run in this iteration** [NEEDS TESTING] |
+| `cargo build --locked -j3 -p photocraft-cli` at `7722172` | same container | ✅ **PASS**: 8 min 44 s; debug binary 710 MB [VERIFIED] |
+| PhotoCraft smoke: PNG → Invert adjustment layer → save `.pcraft` → `info` in a new process → export PNG | same | ✅ **PASS**: the layer tree after reopen contains the `Invert` adjustment layer; exported pixel `(40,35,128)` → `(215,220,127)` [VERIFIED] |
+| `cargo build --locked -j3 -p filmcraft-cli` at `98ba9ac` | same | ✅ **PASS**: 7 min 18 s [VERIFIED] |
+| FilmCraft smoke: PNG → sequence from clip → `effects.apply invert` → save `.fcproj` → reopen → render frame + ProRes export | same | ✅ **PASS**: the effect is persisted in the project; the rendered frame differs from the control; `out.mov` has 150 frames, probed as Apple ProRes 422 HQ + PCM [VERIFIED] |
+| `cargo deny --locked check advisories licenses sources bans` (cargo-deny 0.20.2) | all three, Ubunye `deny.toml` | ✅ **PASS** (see 02 §5) [VERIFIED] |
+| Desktop GUI apps; full `cargo test`; Windows; macOS; wasm | — | **not run yet**: needs CI runners (Milestone 2) [NEEDS TESTING] |
 
-Script for the smoke test (to become a CI job): [`templates/smoke-light.sh`](templates/smoke-light.sh).
+Smoke scripts (installed in each fork as `ubunye/scripts/smoke.sh` and run by `ubunye-ci.yml`): [`templates/smoke-light.sh`](templates/smoke-light.sh), [`templates/smoke-photo.sh`](templates/smoke-photo.sh), [`templates/smoke-film.sh`](templates/smoke-film.sh).
 
 ## 2. Platform support matrix (upstream claims vs what we verified)
 
 | Platform | LightCraft | PhotoCraft | FilmCraft | Our evidence |
 |---|---|---|---|---|
-| Linux x86_64 (glibc ≥ 2.35, Ubuntu 22.04 baseline) | release: AppImage, deb, rpm, tar, Flatpak | same | same | Light CLI builds and passes the smoke test ✅; others NEEDS TESTING |
+| Linux x86_64 (glibc ≥ 2.35, Ubuntu 22.04 baseline) | release: AppImage, deb, rpm, tar, Flatpak | same | same | all three CLIs build and pass their smoke tests ✅ (headless, CPU path); GUI NEEDS TESTING |
 | Linux aarch64 | release | release | release | NEEDS TESTING |
 | macOS 11+ universal (arm64 + x86_64) | signed, notarised DMG | same | same | NEEDS TESTING (needs a macOS runner) |
 | Windows x64 / x86 / arm64 (MSVC) | MSI + zip | same | same | NEEDS TESTING; upstream calls Windows "thinly tested" |
@@ -61,4 +66,4 @@ Script for the smoke test (to become a CI job): [`templates/smoke-light.sh`](tem
 4. LightCraft macOS `Info.plist` carries PhotoCraft leftovers (`.pcraft`, Photoshop PSB UTI). Fix in our packaging overlay.
 5. PhotoCraft upstream scorecard: GPU compositor panics in the 150-layer scenario, and 46 of 149 settings do nothing.
 
-**Readiness statement:** no application is production-ready. One CLI compiled and passed a headless round trip. That shows the toolchain works and the persistence model works for one path. It says nothing about GUI stability, platform coverage, parser robustness or output fidelity.
+**Readiness statement:** no application is production-ready. All three CLIs compiled on Linux and passed a headless round trip. That shows the toolchain works and the persistence model works for one path. It says nothing about GUI stability, platform coverage, parser robustness or output fidelity.
