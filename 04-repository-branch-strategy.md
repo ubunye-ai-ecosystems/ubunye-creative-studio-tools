@@ -9,7 +9,7 @@ None of these exist yet. [VERIFIED: org search on 2026-10-10 returned 12 repos, 
 | `ubunye-creative-light` | full-history mirror of `storytold/lightcraft` | `https://github.com/storytold/lightcraft.git` | RAW development app |
 | `ubunye-creative-photo` | full-history mirror of `storytold/photocraft` | `https://github.com/storytold/photocraft.git` | image editor |
 | `ubunye-creative-film` | full-history mirror of `storytold/filmcraft` | `https://github.com/storytold/filmcraft.git` | video editor |
-| `ubunye-creative-studio` | new, empty | — | cross-app architecture, brand kit, reusable CI workflows, `deny.toml`, packaging templates, release manifests, these documents |
+| `ubunye-creative-studio-tools` | new, empty | — | cross-app architecture, brand kit, reusable CI workflows, `deny.toml`, packaging templates, release manifests, these documents |
 | `craft-fonts` (mirror) | full-history mirror of `storytold/craft-fonts` | `storytold/craft-fonts` | pinned font input for release builds |
 
 ### Why mirror instead of using GitHub's "Fork" button

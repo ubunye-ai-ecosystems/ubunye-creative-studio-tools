@@ -1,7 +1,7 @@
 # 06 — Deployment architecture: ThabangVision downloads and browser apps
 
 Status: **proposal**. Nothing has been created in Cloudflare, Vercel or the ThabangVision repo.
-The ThabangVision repository (`LeparaLaMapara/thabangvisionaistudios`) is private and was not readable in this session. Its framework, hosting and routes are therefore [ASSUMPTION] (TypeScript, likely Next.js on Vercel) until the repo is inspected.
+The ThabangVision repository (`LeparaLaMapara/thabangvisionaistudios`) was inspected on 2026-10-10 [VERIFIED]: Next.js 16 app router, React 19, hosted on Vercel, route groups `(marketing)`, `(platform)`, `(admin)`, `(immersive)`. **`/studio` is already taken** by the productions portfolio (`app/(platform)/studio`, ISR 60 s) and `/ubunye-ai-studio` is the immersive AI page. The catalogue therefore uses **`/tools`** (decided 2026-10-10). Nothing in that repo has been changed.
 
 ## 1. Overview
 
@@ -12,7 +12,7 @@ The ThabangVision repository (`LeparaLaMapara/thabangvisionaistudios`) is privat
                            │ sign (Apple Developer ID + notarise; Windows Azure Trusted Signing; Linux minisign/GPG)
                            │ SHA256SUMS + SBOM (CycloneDX) + THIRD-PARTY-LICENSES + provenance attestation
                            ▼
-                 ┌──────────────── Cloudflare R2 bucket: ubunye-releases ────────────────┐
+                 ┌──────────────── Cloudflare R2 bucket: ubunye-creative-releases ───────┐
                  │  /light/0.5.0-ubunye.1/ubunye-creative-light-0.5.0-ubunye.1-macos-universal.dmg  │
                  │  /light/0.5.0-ubunye.1/SHA256SUMS, SHA256SUMS.sig, sbom.cdx.json                  │
                  │  /manifests/light/stable.json   /manifests/catalog.json  (small, short cache)    │
@@ -20,9 +20,9 @@ The ThabangVision repository (`LeparaLaMapara/thabangvisionaistudios`) is privat
                            │ custom domain                                   │
             downloads.thabangvision.com (R2 public bucket via CF custom domain)
                            │                                                  │
-   thabangvision.com/studio (existing site, reads catalog.json at build/ISR)  │
+   thabangvision.com/tools (existing site, reads catalog.json at build/ISR)  │
             "Download for macOS" ─────────────────────────────────────────────┘
-   light.studio.thabangvision.com / photo.… / film.…  ← Cloudflare Pages (web builds, static wasm)
+   light.tools.thabangvision.com / photo.… / film.…  ← Cloudflare Pages (web builds, static wasm)
 ```
 
 Visitors never see GitHub. Every download link points at `downloads.thabangvision.com`.
@@ -36,7 +36,9 @@ Visitors never see GitHub. Every download link points at `downloads.thabangvisio
 | S3 API for CI uploads | yes | n/a | no | n/a |
 | Immutable versioned paths + rollback | yes (our layout) | yes | yes | no |
 
-Decision: **R2** is primary storage. GitHub Releases on the Ubunye repos is an optional secondary mirror for developers. Cloudinary is not used for binaries.
+Supabase Storage was also considered (2026-10-10) and rejected for binaries: egress is billed beyond the plan quota, the Free plan has a 1 GB storage cap and 50 MB per file (our installers are 75 to 95 MB), and one release of three apps is about 6 GB. Supabase stays useful for small metadata (for example download counts) if ever needed.
+
+Decision: **R2** is primary storage, in a **new dedicated bucket `ubunye-creative-releases`** (not the Sekhoto `edu-papers` bucket). GitHub Releases on the Ubunye repos is an optional secondary mirror for developers. Cloudinary is not used for binaries.
 
 Bucket layout and rules:
 - Versioned objects are **immutable**: `/<app>/<version>/<file>`, `Cache-Control: public, max-age=31536000, immutable`.
@@ -48,7 +50,7 @@ Bucket layout and rules:
 
 - Version: `X.Y.Z-ubunye.N` (upstream base plus our build). Channels: `stable` and `beta` (and `nightly` internally).
 - Manifest per app and channel: see [`templates/release-manifest.json`](templates/release-manifest.json). It lists the version, release date, minimum OS, and per-platform `url`, `size`, `sha256` and `signature`, plus release notes, `upstream_sha`, and the licence/attribution URLs.
-- `catalog.json` aggregates all apps for the `/studio` page: name, tagline, icon, screenshots, stable version, platforms, web app URL, maturity badge ("Preview", never "Production" until the acceptance criteria in 07 are met).
+- `catalog.json` aggregates all apps for the `/tools` page: name, tagline, icon, screenshots, stable version, platforms, web app URL, maturity badge ("Preview", never "Production" until the acceptance criteria in 07 are met).
 - The manifest is signed with **minisign** (ed25519). The private key lives in the release environment secret. The public key is embedded in the apps (for updates) and published on the site.
 
 ## 4. Signing
@@ -77,19 +79,19 @@ New identities (replacing upstream; approved 2026-10-10): bundle and app IDs `or
 | Storage | OPFS | localStorage + IndexedDB | OPFS (media copies ≤4 GiB) |
 
 **Hosting: Cloudflare Pages** (one project per app). Reasons: upstream already ships `_headers` for Pages and sizes files for its 25 MiB limit; free bandwidth; preview deployments per branch; same account as R2.
-Domains: `light.studio.thabangvision.com`, `photo.studio.thabangvision.com`, `film.studio.thabangvision.com`. Using separate origins isolates OPFS/IndexedDB per app and keeps the main site's cookies out of the wasm apps.
+Domains: `light.tools.thabangvision.com`, `photo.tools.thabangvision.com`, `film.tools.thabangvision.com`. Using separate origins isolates OPFS/IndexedDB per app and keeps the main site's cookies out of the wasm apps.
 Alternative: Vercel, if the main site is already there. Vercel's static asset limits and bandwidth pricing for 13–19 MB wasm per visit make Pages preferable [ASSUMPTION; compare once the plan is known].
 Each web app is labelled **"Preview — runs entirely in your browser; files never leave your device"**, which is accurate per upstream docs.
 
 ## 7. ThabangVision site changes (feature branch + preview only)
 
-All changes happen on a branch such as `feature/studio-catalogue` in `thabangvisionaistudios`, reviewed through Vercel (or equivalent) **preview deployments**. Production (`main`) is untouched until explicit approval.
+All changes happen on a branch such as `feature/tools-catalogue` in `thabangvisionaistudios`, reviewed through Vercel (or equivalent) **preview deployments**. Production (`main`) is untouched until explicit approval.
 
 Proposed routes [ASSUMPTION: Next.js app router]:
-- `/studio`: catalogue of the three apps (from `catalog.json`): description, screenshots, "Download" (OS auto-detected), "Open in browser", system requirements, licence and credits ("Based on LightCraft by the ArtCraft team, MIT/Apache-2.0").
-- `/studio/[app]`: detail page, all platforms, checksums, release notes, previous versions.
-- `/studio/[app]/download/[platform]`: optional redirect endpoint (302 to R2) for download analytics without third-party trackers.
-- `/studio/licenses`: aggregated attribution, the Adobe non-affiliation disclaimer, codec notices.
+- `/tools`: catalogue of the three apps (from `catalog.json`): description, screenshots, "Download" (OS auto-detected), "Open in browser", system requirements, licence and credits ("Based on LightCraft by the ArtCraft team, MIT/Apache-2.0").
+- `/tools/[app]`: detail page, all platforms, checksums, release notes, previous versions.
+- `/tools/[app]/download/[platform]`: optional redirect endpoint (302 to R2) for download analytics without third-party trackers.
+- `/tools/licenses`: aggregated attribution, the Adobe non-affiliation disclaimer, codec notices.
 
 Data flow: the site fetches `https://downloads.thabangvision.com/manifests/catalog.json` at build time with ISR (revalidate every 300 s). No GitHub API calls and no GitHub account needed by visitors.
 

@@ -1,12 +1,19 @@
-# Ubunye Creative Studio: Phase 1 research and architecture
+# Ubunye Creative Studio Tools
 
-> **Staging location.** These documents are kept here temporarily because the
-> `ubunye-ai-ecosystems/ubunye-creative-studio` repository does not exist yet. Once the
-> plan is approved, they move into that repo with history (Milestone 1.5) and this folder is removed.
-> Nothing here affects Track4World's code.
+Free, open source creative tools from Ubunye AI Ecosystems, distributed through ThabangVision.
+This repository coordinates the suite: architecture, upstream sync, branding and releases.
+
+| App | Repository | Based on |
+|---|---|---|
+| Ubunye Creative Light (RAW photo development) | [ubunye-creative-light](https://github.com/ubunye-ai-ecosystems/ubunye-creative-light) | LightCraft by the ArtCraft team |
+| Ubunye Creative Photo (image editing) | [ubunye-creative-photo](https://github.com/ubunye-ai-ecosystems/ubunye-creative-photo) | PhotoCraft by the ArtCraft team |
+| Ubunye Creative Film (video editing) | [ubunye-creative-film](https://github.com/ubunye-ai-ecosystems/ubunye-creative-film) | FilmCraft by the ArtCraft team |
+
+The Phase 1 documents were first written in a staging folder on `LeparaLaMapara/Track4World`
+(branch `ccr-2c411eb0-0d701l`). They were moved here with their commit history on 2026-10-10.
 
 Date: 2026-10-10. Scope: research, repository strategy and architecture only.
-No repositories were created. No upstream, Ubunye Engine or ThabangVision code was modified, and nothing was deployed.
+At the time of writing no repositories had been created (see Milestone 1 status for what exists now). No upstream, Ubunye Engine or ThabangVision code was modified, and nothing was deployed.
 
 ## Deliverables
 
@@ -32,7 +39,7 @@ No repositories were created. No upstream, Ubunye Engine or ThabangVision code w
 7. **Builds verified (partial).** All three CLIs build on Linux with rustc 1.97 (Light 13 min 41 s, Photo 8 min 44 s, Film 7 min 18 s on 4 vCPU) and pass a headless **import → edit → save → reopen → export** round trip on the CPU path. GUI, Windows, macOS and web are not yet built, and **nothing is production-ready.**
 8. **Legal review is needed** for codec patents (H.264, HEVC, AAC), Adobe feature names in the UI (Lumetri and others), the provenance of AI-generated code, and the licences of downloadable models (SAM 3 non-OSI, RawNIND GPL-3.0).
 9. **Ubunye Engine** is a Python data and ML pipeline framework with an MCP server. It has no image or video AI today. Integration is agent orchestration over MCP, not linking.
-10. **The ThabangVision repo is private and could not be inspected** in this session. Deployment routes are therefore proposals.
+10. **ThabangVision repo inspected (2026-10-10, from the dev box).** It is Next.js 16 on Vercel. **`/studio` is already in use** by the live photography and video productions portfolio (`app/(platform)/studio`), and `/ubunye-ai-studio` also exists. The software catalogue therefore lives at **`/tools`** (see decision 8 and doc 06).
 
 ## Decisions (2026-10-10)
 
@@ -44,18 +51,23 @@ No repositories were created. No upstream, Ubunye Engine or ThabangVision code w
 | 4 | Identifier namespace **`org.ubunye.creative.*`**; vendor "Ubunye AI Ecosystems". Canonical IDs and Windows UpgradeCodes are in [`brand/identities.toml`](brand/identities.toml). (Spoken as "org.ubuntu.creative"; we use **ubunye**, since "Ubuntu" is a Canonical trademark.) | ✅ approved |
 | 5 | Sync cadence: **daily check** with one rolling integration PR per app | ✅ approved |
 | 6 | Legal review (codecs, trademarks, provenance, model licences) and signing paperwork | ⏸ deferred by the owner until after the build-out |
-| 7 | Read access to `LeparaLaMapara/thabangvisionaistudios` for the `/studio` work | ⏳ open |
+| 7 | Read access to `LeparaLaMapara/thabangvisionaistudios` | ✅ done from the dev box |
+| 8 | Suite name **Ubunye Creative Studio Tools**; coordination repo `ubunye-creative-studio-tools`; catalogue at `thabangvision.com/tools` (`/studio` is taken) | ✅ decided 2026-10-10 |
+| 9 | Release storage: a **new dedicated Cloudflare R2 bucket**, not the existing `edu-papers` bucket and not Supabase Storage (egress is billed there; installers are 75 to 95 MB each, about 23 files per app per release) | ✅ decided 2026-10-10 |
+| 10 | Repos start **private with GitHub Actions disabled**. Upstream's own workflows (CI, nightly perf, FreeBSD, release) would otherwise run on our private minutes, and two of our workflows use actions the org allow list blocks. Go public, then enable Actions, after the ArtCraft marks are removed (the brand licence requires removal before publishing a modified version) | ✅ decided 2026-10-10 |
 
 ## Milestone 1 status
 
 | Step | Status |
 |---|---|
-| Fork preparation tooling: [`scripts/prepare_fork.py`](scripts/prepare_fork.py), [`fork-overlay/`](fork-overlay/), [`scripts/publish_fork.sh`](scripts/publish_fork.sh) | ✅ built and tested |
-| Local forks prepared with full history (Light 1,552 commits / 6 tags; Photo 1,151 / 8; Film 1,098 / 6), remotes `origin` + `upstream` (push disabled), branches `main`, `upstream-main`, `develop` | ✅ verified: HEAD and tags identical to upstream |
-| Per-app smoke tests (import → edit → save → reopen → export) for Light, Photo and Film CLIs on Linux | ✅ all pass |
-| `cargo deny check` (advisories, licences, sources, bans) with the Ubunye `deny.toml` | ✅ all three pass |
-| Daily sync workflow: simulated locally against real upstream history (clean merge, conflict, history-rewrite paths) | ✅ passes ([details](05-upstream-sync-design.md#7-verification)) |
-| Create GitHub repos in `ubunye-ai-ecosystems` and push | ⛔ **blocked**: GitHub API returned `403 Resource not accessible by integration` for repo creation. A maintainer must create the four empty repos (or grant the Claude GitHub App "Administration: write" on the org), then run `scripts/publish_fork.sh`. |
+| Fork preparation tooling: [`scripts/prepare_fork.py`](scripts/prepare_fork.py), [`fork-overlay/`](fork-overlay/), [`scripts/publish_fork.sh`](scripts/publish_fork.sh) | ✅ built and tested (Linux and Windows; the script now reads and writes UTF-8 explicitly, which Windows needs) |
+| Repos created in `ubunye-ai-ecosystems`: light, photo, film, studio-tools (private, Actions off) | ✅ 2026-10-10 |
+| Forks published with full history: Light 1,552 commits / 6 tags (main `b70ae174`); Photo 1,167 / 8 (main `5bb768b8`); Film 1,098 / 6 (main `98ba9acb`). Branches `main` = `upstream-main` = upstream HEAD, `develop` = plus one scaffolding commit; default branch `develop`. Remote refs verified equal to local | ✅ 2026-10-10 |
+| Per-app smoke tests (import, edit, save, reopen, export) for the three CLIs on Linux | ✅ all pass (cloud session) |
+| `cargo deny check` with the Ubunye `deny.toml` | ✅ all three pass |
+| Daily sync workflow simulated against real upstream history | ✅ passes ([details](05-upstream-sync-design.md#7-verification)) |
+| Branch protection | ⛔ not available for private repos on the GitHub Free plan. Applied when the repos go public |
+| Windows builds | ⏳ in progress on the dev box |
 
 ## How to finish Milestone 1 (once the repo-creation block is fixed)
 

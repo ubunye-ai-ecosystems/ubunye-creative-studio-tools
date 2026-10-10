@@ -78,7 +78,7 @@ jobs:
       - name: Build change report
         if: steps.cmp.outputs.changed == 'true'
         run: |
-          # Shared, deterministic classifier from ubunye-creative-studio (features/fixes/breaking/security,
+          # Shared, deterministic classifier from ubunye-creative-studio-tools (features/fixes/breaking/security,
           # Cargo.lock delta, cargo-audit delta, brand drift, conflict hotspots).
           python3 -I ubunye/scripts/upstream_report.py \
             --from "${{ steps.cmp.outputs.last }}" --to "${{ steps.cmp.outputs.new }}" \

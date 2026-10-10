@@ -12,7 +12,7 @@ Decisions needed are listed in [README.md](README.md#decisions-needed).
 | 1.2 | Mirror-push upstream `main` + all tags (procedure in 04 §1) | `git rev-list --count` and the HEAD SHA equal upstream; all tags present; authors and dates unchanged |
 | 1.3 | Branches `upstream-main`, `develop`, `main`; rulesets per 04 §2 | Force-push blocked; `develop` requires a PR, 1 approval and checks; the bot can write only `upstream-main` and `integration/**` |
 | 1.4 | Add Ubunye docs (`UPSTREAM.md`, `UPSTREAM_STATE.json`, `ubunye/{ARCHITECTURE,DEVELOPMENT,ROADMAP,SECURITY,REBRANDING,CLAUDE}.md`) and `rust-toolchain.toml` | Docs merged by PR; LICENSE, NOTICE and ATTRIBUTION byte-identical to upstream |
-| 1.5 | `ubunye-creative-studio` repo: move these documents in; add shared `deny.toml`, reusable workflows | This staging folder is removed from Track4World |
+| 1.5 | `ubunye-creative-studio-tools` repo: move these documents in; add shared `deny.toml`, reusable workflows | This staging folder is removed from Track4World |
 
 ## Milestone 2 — CI and a quality baseline (before any feature work)
 | # | Task | Acceptance criteria |
@@ -35,7 +35,7 @@ Decisions needed are listed in [README.md](README.md#decisions-needed).
 ## Milestone 4 — Branding 🔒 (requires approved brand kit)
 | # | Task | Acceptance criteria |
 |---|---|---|
-| 4.1 | Brand kit in `ubunye-creative-studio/brand/`: names, icons (macOS icns, Windows ico, hicolor PNGs, favicon), colours, splash, DMG background | Original or properly licensed; licence file included |
+| 4.1 | Brand kit in `ubunye-creative-studio-tools/brand/`: names, icons (macOS icns, Windows ico, hicolor PNGs, favicon), colours, splash, DMG background | Original or properly licensed; licence file included |
 | 4.2 | Brand layer per app: `ubunye-brand` crate/consts + packaging overlay + i18n overlay; remove ArtCraft marks; new app IDs, UpgradeCodes and vendor; repoint links and update channels | Brand-leak check: zero `ArtCraft`, `getartcraft`, `ai.storyteller`, `Learning Machines` or `storytold` outside the allow-list (LICENSE/NOTICE/ATTRIBUTION/credits/UPSTREAM). "Based on X by the ArtCraft team" credit visible in About. Integration diff stays small (< ~40 files per app as the target) |
 | 4.3 | Rename Adobe feature labels (Lumetri and others) after legal review | Legal sign-off recorded |
 

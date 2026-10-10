@@ -110,7 +110,7 @@ Publication / shared deps [VERIFIED]: no `git+` sources in any lockfile; none of
 
 Summary: **photocraft has 0 vulnerabilities** (4 warnings); **lightcraft 7** and **filmcraft 5** vulnerabilities, almost all from one alpha crate (`rustls-rustcrypto`) used for model/asset downloads. Exploitability is limited to HTTPS download paths (TLS cert validation, RSA timing) and, for quick-xml, to parsing hostile XMP sidecars. [VERIFIED for presence; exploitability ASSUMPTION]. A shared `deny.toml` in the studio core would catch these in CI.
 
-## 5. Recommendation: a shared "ubunye-creative-studio" core?
+## 5. Recommendation: a shared "ubunye-creative-studio-tools" core?
 
 **What is realistically extractable** (small, low-churn, already near-identical):
 1. `xtask` helpers: `version`, `ico`, `stats`, layer checker, asset/attribution checker → one `ubunye-xtask-common` lib (or keep as copied files with a sync script).
@@ -127,4 +127,4 @@ Summary: **photocraft has 0 vulnerabilities** (4 warnings); **lightcraft 7** and
 - Licence hygiene: lightcraft's Apache-2.0-only `segment` crate and per-repo NOTICE/ATTRIBUTION must be preserved per binary; a merged core must carry the union of attributions.
 - MSRV differs (1.90 vs 1.95) — core must target the max.
 
-**Recommended approach** [ASSUMPTION]: keep three thin forks that track upstream `main` with minimal patches (branding, app ids, release targets), and put sharing in a separate `ubunye-creative-studio` repo that holds *non-invasive* artefacts: brand assets, reusable CI workflows, packaging templates, `deny.toml`/version policy, a catalogue manifest for the website, and docs. Revisit code-level sharing only if upstream itself starts sharing crates.
+**Recommended approach** [ASSUMPTION]: keep three thin forks that track upstream `main` with minimal patches (branding, app ids, release targets), and put sharing in a separate `ubunye-creative-studio-tools` repo that holds *non-invasive* artefacts: brand assets, reusable CI workflows, packaging templates, `deny.toml`/version policy, a catalogue manifest for the website, and docs. Revisit code-level sharing only if upstream itself starts sharing crates.

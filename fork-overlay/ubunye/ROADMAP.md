@@ -1,6 +1,6 @@
 # {{NAME}}: Ubunye roadmap
 
-The upstream feature roadmap is in the root `ROADMAP.md` (owned by upstream). This file covers only Ubunye work. See `ubunye-creative-studio/07-implementation-plan.md` for the full plan and acceptance criteria.
+The upstream feature roadmap is in the root `ROADMAP.md` (owned by upstream). This file covers only Ubunye work. See `ubunye-creative-studio-tools/07-implementation-plan.md` for the full plan and acceptance criteria.
 
 | Milestone | Status |
 |---|---|

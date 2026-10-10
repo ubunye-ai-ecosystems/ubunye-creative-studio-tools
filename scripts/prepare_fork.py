@@ -23,7 +23,7 @@ import tomllib
 
 STUDIO = pathlib.Path(__file__).resolve().parent.parent
 OVERLAY = STUDIO / "fork-overlay"
-IDS = tomllib.loads((STUDIO / "brand" / "identities.toml").read_text())
+IDS = tomllib.loads((STUDIO / "brand" / "identities.toml").read_text(encoding="utf-8"))
 
 LINUX_BASE = "libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev"
 
@@ -127,7 +127,7 @@ def main() -> int:
 
     count = int(sh("git", "rev-list", "--count", head, cwd=repo))
     date = sh("git", "log", "-1", "--format=%cI", head, cwd=repo)
-    version = tomllib.loads((repo / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+    version = tomllib.loads((repo / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
     tag = sh("git", "describe", "--tags", "--abbrev=0", head, cwd=repo) if count else None
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -137,7 +137,7 @@ def main() -> int:
         rel = f.relative_to(OVERLAY)
         out = repo / rel
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render(f.read_text(), d))
+        out.write_text(render(f.read_text(encoding="utf-8"), d), encoding="utf-8")
     (repo / "ubunye" / "scripts").mkdir(parents=True, exist_ok=True)
     shutil.copy(STUDIO / "scripts" / "upstream_report.py", repo / "ubunye" / "scripts" / "upstream_report.py")
     smoke = STUDIO / "templates" / f"smoke-{a.app}.sh"
@@ -157,17 +157,18 @@ def main() -> int:
         "pending": None,
         "history": [{"sha": head, "outcome": "initial-import", "commits": count, "conflicts": 0, "ci": "not-run", "recorded_at": now}],
     }
-    (repo / "UPSTREAM_STATE.json").write_text(json.dumps(state, indent=2) + "\n")
+    (repo / "UPSTREAM_STATE.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
     patched = []
     for name, line in PTR.items():
         p = repo / name
         if p.exists():
-            p.write_text(line + p.read_text())
+            p.write_text(line + p.read_text(encoding="utf-8"), encoding="utf-8")
             patched.append(name)
     (repo / "ubunye" / "patched-paths.txt").write_text(
         "# Upstream files modified by Ubunye (one path per line). Used for conflict-hotspot reports.\n"
-        + "".join(f"{x}\n" for x in patched)
+        + "".join(f"{x}\n" for x in patched),
+        encoding="utf-8",
     )
 
     sh("git", "add", "-A", cwd=repo)

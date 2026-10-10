@@ -33,8 +33,8 @@ git push -u origin refs/heads/develop:refs/heads/develop
 
 if command -v gh >/dev/null; then
   gh repo edit "ubunye-ai-ecosystems/$SLUG" --default-branch develop --delete-branch-on-merge \
-    --enable-auto-merge=false --allow-forking=false || true
-  # Branch protection (rulesets): see ubunye-creative-studio/04-repository-branch-strategy.md §2.
+    --enable-auto-merge=false || true
+  # Branch protection (rulesets): see ubunye-creative-studio-tools/04-repository-branch-strategy.md §2.
   for b in develop main upstream-main; do
     gh api -X PUT "repos/ubunye-ai-ecosystems/$SLUG/branches/$b/protection" --input - <<JSON || echo "warn: protection for $b not applied"
 {

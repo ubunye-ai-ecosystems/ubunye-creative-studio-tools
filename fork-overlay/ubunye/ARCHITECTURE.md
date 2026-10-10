@@ -2,7 +2,7 @@
 
 {{NAME}} is {{UPNAME}} at the upstream revision in `../UPSTREAM_STATE.json`, plus the Ubunye patch set in `patched-paths.txt`. For the upstream design, read upstream's own `docs/` and `AGENTS.md`. This file covers only what Ubunye adds and how it fits on top.
 
-Full due-diligence report: `ubunye-creative-studio/research/{{UP}}.md`.
+Full due-diligence report: `ubunye-creative-studio-tools/research/{{UP}}.md`.
 
 ## Shape (upstream)
 
