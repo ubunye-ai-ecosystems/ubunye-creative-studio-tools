@@ -67,7 +67,7 @@ At the time of writing no repositories had been created (see Milestone 1 status 
 | `cargo deny check` with the Ubunye `deny.toml` | ✅ all three pass |
 | Daily sync workflow simulated against real upstream history | ✅ passes ([details](05-upstream-sync-design.md#7-verification)) |
 | Branch protection | ⛔ not available for private repos on the GitHub Free plan. Applied when the repos go public |
-| Windows builds | ⏳ in progress on the dev box |
+| Windows x64 builds, GUI launch and full test runs | ✅ all three build and open; test failures are Windows test setup issues, not product bugs ([report](research/build-windows.md)) |
 
 ## How to finish Milestone 1 (once the repo-creation block is fixed)
 
