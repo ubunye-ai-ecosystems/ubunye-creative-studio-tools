@@ -77,12 +77,17 @@ All of this is [VERIFIED].
 | | LightCraft | PhotoCraft | FilmCraft |
 |---|---|---|---|
 | Locked packages | 656 | 728 | 698 |
-| Licence fields scanned (local registry cache only) | 345 | 260 | ~34% |
+| Licence check | cargo-deny: all crates pass ✅ | all pass ✅ | all pass ✅ (MPL exceptions) |
 | Copyleft-only found | none | none | none |
 | Notable | BSD-2/3, ISC, Zlib, CDLA-Permissive-2.0 (webpki-roots), Unicode-3.0, IJG; `self_cell` Apache-2.0 OR GPL-2.0 (we choose Apache) | same family | **MPL-2.0 symphonia** (unmodified; file-level copyleft, satisfied by crates.io source availability; add it to NOTICE) |
 | `deny.toml` | none | none | none |
 
-**[NEEDS TESTING]:** run `cargo deny check licenses` over the full graph of each repo. Proposed allow-list for our shared `deny.toml`: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0, OFL-1.1, Ubuntu-font-1.0, BSL-1.0, CC0-1.0, IJG. MPL-2.0 goes on an explicit per-crate exception list. GPL, LGPL and AGPL are denied.
+**[VERIFIED 2026-10-10, cargo-deny 0.20.2 on the full default-feature graph of each repo]:** with the policy in `fork-overlay/deny.toml`, `cargo deny --locked check advisories licenses sources bans` passes for **all three** (`advisories ok, bans ok, licenses ok, sources ok`).
+- Allowed: MIT, MIT-0, Apache-2.0, BSD-2/3, ISC, Zlib, Unicode-3.0/DFS-2016, CDLA-Permissive-2.0, OFL-1.1, Ubuntu-font-1.0, BSL-1.0, CC0-1.0, IJG, 0BSD, bzip2-1.0.6 and NCSA. GPL, LGPL and AGPL are denied, and **none are present**.
+- **MPL-2.0 only in FilmCraft**, through 13 unmodified `symphonia*` crates plus `option-ext` and `webpki-root-certs`. These are listed as per-crate exceptions.
+- Known advisories are ignored with an owner (Milestone 2.3).
+- FilmCraft's `rustls-rustcrypto` advisories are **not in the default build**. They only come in through the optional `download` feature (Whisper and Kokoro model downloads).
+- Workspace-internal path dependencies are allowed as wildcards, because nothing is published to crates.io.
 
 ## 6. Codec patents (FilmCraft, and HEIF in Light/Photo) ⚖️
 
