@@ -1,0 +1,17 @@
+:root {
+  --ubunye-bg: #0B0D10;
+  --ubunye-bg-secondary: #161A20;
+  --ubunye-text: #F5F0E6;
+  --ubunye-text-secondary: #A8ADB5;
+  --ubunye-light: #F6C75B;
+  --ubunye-photo: #FF6B4A;
+  --ubunye-film: #13D1C2;
+  --ubunye-light-on-light-bg: #9A6B00;
+  --ubunye-photo-on-light-bg: #C2381A;
+  --ubunye-film-on-light-bg: #007A70;
+  --ubunye-paper: #F5F0E6;
+  --ubunye-ink: #0B0D10;
+  --ubunye-font-display: "DM Serif Display", serif;
+  --ubunye-font-label: "Inter", sans-serif;
+  --ubunye-label-tracking: 0.32em;
+}

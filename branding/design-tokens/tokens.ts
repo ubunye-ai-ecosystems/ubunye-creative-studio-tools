@@ -1,0 +1,46 @@
+// Generated from tokens.json by branding/tools/build.py. Do not edit.
+export const ubunyeTokens = {
+  "color": {
+    "bg": "#0B0D10",
+    "bg-secondary": "#161A20",
+    "text": "#F5F0E6",
+    "text-secondary": "#A8ADB5",
+    "light": "#F6C75B",
+    "photo": "#FF6B4A",
+    "film": "#13D1C2",
+    "light-on-light-bg": "#9A6B00",
+    "photo-on-light-bg": "#C2381A",
+    "film-on-light-bg": "#007A70",
+    "paper": "#F5F0E6",
+    "ink": "#0B0D10"
+  },
+  "font": {
+    "display": "DM Serif Display",
+    "label": "Inter",
+    "label-tracking-em": 0.32
+  },
+  "radius": {
+    "icon-ratio": 0.22,
+    "card-px": 22
+  },
+  "apps": {
+    "light": {
+      "name": "Ubunye Light",
+      "monogram": "UL",
+      "category": "RAW PHOTOGRAPHY",
+      "tagline": "Capture the world in its purest form."
+    },
+    "photo": {
+      "name": "Ubunye Photo",
+      "monogram": "UP",
+      "category": "IMAGE EDITING",
+      "tagline": "Shape your vision with precision."
+    },
+    "film": {
+      "name": "Ubunye Film",
+      "monogram": "UF",
+      "category": "VIDEO EDITING",
+      "tagline": "Turn moments into moving stories."
+    }
+  }
+} as const;
