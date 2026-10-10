@@ -12,7 +12,7 @@ The ThabangVision repository (`LeparaLaMapara/thabangvisionaistudios`) was inspe
                            │ sign (Apple Developer ID + notarise; Windows Azure Trusted Signing; Linux minisign/GPG)
                            │ SHA256SUMS + SBOM (CycloneDX) + THIRD-PARTY-LICENSES + provenance attestation
                            ▼
-                 ┌──────────────── Cloudflare R2 bucket: ubunye-creative-releases ───────┐
+                 ┌──────────────── Cloudflare R2 bucket: ubunye-creative-tools ──────────┐
                  │  /light/0.5.0-ubunye.1/ubunye-creative-light-0.5.0-ubunye.1-macos-universal.dmg  │
                  │  /light/0.5.0-ubunye.1/SHA256SUMS, SHA256SUMS.sig, sbom.cdx.json                  │
                  │  /manifests/light/stable.json   /manifests/catalog.json  (small, short cache)    │
@@ -38,7 +38,7 @@ Visitors never see GitHub. Every download link points at `downloads.thabangvisio
 
 Supabase Storage was also considered (2026-10-10) and rejected for binaries: egress is billed beyond the plan quota, the Free plan has a 1 GB storage cap and 50 MB per file (our installers are 75 to 95 MB), and one release of three apps is about 6 GB. Supabase stays useful for small metadata (for example download counts) if ever needed.
 
-Decision: **R2** is primary storage, in a **new dedicated bucket `ubunye-creative-releases`** (not the Sekhoto `edu-papers` bucket). GitHub Releases on the Ubunye repos is an optional secondary mirror for developers. Cloudinary is not used for binaries.
+Decision: **R2** is primary storage, in a **new dedicated bucket `ubunye-creative-tools`** in Western Europe (`weur`, the closest R2 region to South Africa; not the Sekhoto `edu-papers` bucket). GitHub Releases on the Ubunye repos is an optional secondary mirror for developers. Cloudinary is not used for binaries.
 
 Bucket layout and rules:
 - Versioned objects are **immutable**: `/<app>/<version>/<file>`, `Cache-Control: public, max-age=31536000, immutable`.

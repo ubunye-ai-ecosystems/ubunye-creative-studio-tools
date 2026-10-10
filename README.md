@@ -53,7 +53,7 @@ At the time of writing no repositories had been created (see Milestone 1 status 
 | 6 | Legal review (codecs, trademarks, provenance, model licences) and signing paperwork | ⏸ deferred by the owner until after the build-out |
 | 7 | Read access to `LeparaLaMapara/thabangvisionaistudios` | ✅ done from the dev box |
 | 8 | Suite name **Ubunye Creative Studio Tools**; coordination repo `ubunye-creative-studio-tools`; catalogue at `thabangvision.com/tools` (`/studio` is taken) | ✅ decided 2026-10-10 |
-| 9 | Release storage: a **new dedicated Cloudflare R2 bucket**, not the existing `edu-papers` bucket and not Supabase Storage (egress is billed there; installers are 75 to 95 MB each, about 23 files per app per release) | ✅ decided 2026-10-10 |
+| 9 | Release storage: a **new dedicated Cloudflare R2 bucket, `ubunye-creative-tools`, in Western Europe**, not the existing `edu-papers` bucket and not Supabase Storage (egress is billed there; installers are 75 to 95 MB each, about 23 files per app per release) | ✅ decided 2026-10-10 |
 | 10 | Repos start **private with GitHub Actions disabled**. Upstream's own workflows (CI, nightly perf, FreeBSD, release) would otherwise run on our private minutes, and two of our workflows use actions the org allow list blocks. Go public, then enable Actions, after the ArtCraft marks are removed (the brand licence requires removal before publishing a modified version) | ✅ decided 2026-10-10 |
 
 ## Milestone 1 status
