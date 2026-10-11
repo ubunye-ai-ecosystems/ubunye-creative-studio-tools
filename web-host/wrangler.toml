@@ -2,6 +2,8 @@
 name = "ubunye-creative-web"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
+# save.client.js is sent to browsers as text, not run in the Worker
+rules = [{ type = "Text", globs = ["**/*.client.js"], fallthrough = false }]
 workers_dev = false
 
 routes = [
