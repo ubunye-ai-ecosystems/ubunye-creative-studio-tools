@@ -1,0 +1,15 @@
+# Browser builds of Ubunye Light, Photo and Film, served from R2. Deploy: npx wrangler deploy
+name = "ubunye-creative-web"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+routes = [
+  { pattern = "light.tools.thabangvision.com", custom_domain = true },
+  { pattern = "photo.tools.thabangvision.com", custom_domain = true },
+  { pattern = "film.tools.thabangvision.com", custom_domain = true },
+]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ubunye-creative-tools"
