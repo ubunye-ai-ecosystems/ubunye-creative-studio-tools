@@ -300,6 +300,11 @@ def main() -> None:
                 p.write_text(svg, encoding="utf-8", newline="\n")
                 if not svg_only:
                     render(p, p.with_suffix(".png"), w, h)
+        # App integration: 512-unit masters the forks' ubunye/brand/render_icons.py consumes.
+        e = ROOT / "exports" / app
+        e.mkdir(parents=True, exist_ok=True)
+        (e / "icon.svg").write_text(icon_svg(app, size=512, margin=0.035), encoding="utf-8", newline="\n")
+        (e / "icon-small.svg").write_text(icon_svg(app, size=512, margin=0.0, small=True), encoding="utf-8", newline="\n")
         if not svg_only:
             rasterize_icons(app)
     for theme in ("dark", "light"):
