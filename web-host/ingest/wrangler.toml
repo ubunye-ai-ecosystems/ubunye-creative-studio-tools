@@ -1,0 +1,11 @@
+# Copies release files from GitHub into R2 (see src/index.js). Deploy: npx wrangler deploy
+# Secret: npx wrangler secret put INGEST_KEY
+name = "ubunye-creative-ingest"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+routes = [{ pattern = "ingest.tools.thabangvision.com", custom_domain = true }]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ubunye-creative-tools"
