@@ -59,6 +59,12 @@ Decisions needed are listed in [README.md](README.md#decisions-needed).
 - Ubunye Engine today is a Python data/ML pipeline framework with an LLM port and an MCP server. It has **no image or video models**. Integration path: agent orchestration over the apps' MCP servers plus Ubunye Engine's MCP; batch pipelines (export → process → import). In-app real-time AI should use Rust-native ONNX/candle runtimes, which the apps already have.
 - Deliverable: an evaluation of model licences, size, quality and runtime for each feature.
 
+## Milestone 8 — Long-term vision: Ubunye Projects (collaboration and version history) ⏸
+Parked as a long-term to-do by the owner on 2026-10-12. Full plan: [08-collaboration-plan.md](08-collaboration-plan.md).
+- Goal: creatives in different places (for example Johannesburg and Nairobi) edit the same photo or video project together, Git style: every save a signed version, history, compare, restore, invite by role, no 50 GB downloads, no central server.
+- Phases: 0 spec + measurements (1 week), 1 Light offline history (2), 2 two desktops (2 to 3), 3 browser review (2), 4 Film (3 to 4), 5 Photo (2), 6 hardening (2). About 14 to 16 weeks in total.
+- Before starting: owner answers the five decisions in 08 section 14, and the forks' red `develop` CI is fixed.
+
 ## Risk register
 
 | # | Risk | Likelihood | Impact | Mitigation |

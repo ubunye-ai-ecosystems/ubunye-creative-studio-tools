@@ -1,6 +1,6 @@
 # 08 · Ubunye Projects: collaboration and version history plan
 
-Status: proposal, 2026-10-12. Nothing here is built yet. Working name for the protocol: **Kopano** (Sesotho for "gathering"). The product name in the apps stays "Ubunye Projects".
+Status: **parked as a long-term to-do** (owner, 2026-10-12). Proposal only; nothing here is built yet. Tracked as Milestone 8 in [07-implementation-plan.md](07-implementation-plan.md). Working name for the protocol: **Kopano** (Sesotho for "gathering"). The product name in the apps stays "Ubunye Projects".
 
 ## 1. The goal in one scenario
 
