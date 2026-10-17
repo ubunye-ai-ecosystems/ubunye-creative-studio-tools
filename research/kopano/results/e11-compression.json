@@ -1,0 +1,98 @@
+[
+ {
+  "what": "ARW file",
+  "method": "zstd-3",
+  "orig": 49325568,
+  "out": 38465832,
+  "pct": 78.0,
+  "secs": 0.49,
+  "exact": true
+ },
+ {
+  "what": "ARW file",
+  "method": "zstd-19",
+  "orig": 49325568,
+  "out": 34684024,
+  "pct": 70.3,
+  "secs": 28.84,
+  "exact": true
+ },
+ {
+  "what": "ARW file",
+  "method": "xz-9",
+  "orig": 49325568,
+  "out": 28229608,
+  "pct": 57.2,
+  "secs": 27.34,
+  "exact": true
+ },
+ {
+  "what": "ARW sensor",
+  "method": "jpegxl-lossless-e3 (4 planes)",
+  "orig": 49325568,
+  "out": 21776557,
+  "pct": 44.1,
+  "secs": 1.85,
+  "exact": true
+ },
+ {
+  "what": "ARW sensor",
+  "method": "jpegxl-lossless-e7 (4 planes)",
+  "orig": 49325568,
+  "out": 22082184,
+  "pct": 44.8,
+  "secs": 65.24,
+  "exact": true
+ },
+ {
+  "what": "ARW sensor",
+  "method": "jpeg-ls (4 planes)",
+  "orig": 49325568,
+  "out": 21818785,
+  "pct": 44.2,
+  "secs": 0.72,
+  "exact": true
+ },
+ {
+  "what": "ARW sensor",
+  "method": "entropy of left-neighbour residual",
+  "bits_per_sample": 7.48,
+  "stored_bits": 16
+ },
+ {
+  "what": "camera JPEG",
+  "method": "zstd-19",
+  "orig": 4128768,
+  "out": 4033098,
+  "pct": 97.7,
+  "secs": 0.85,
+  "exact": true
+ },
+ {
+  "what": "ARW",
+  "method": "proxy JPEG q85 2012x3012",
+  "orig": 49325568,
+  "out": 531983,
+  "pct": 1.1,
+  "secs": 0.05,
+  "exact": false
+ },
+ {
+  "what": "ARW",
+  "method": "proxy JPEG XL d1.0 2012x3012",
+  "orig": 49325568,
+  "out": 444923,
+  "pct": 0.9,
+  "secs": 4.38,
+  "exact": false
+ },
+ {
+  "what": "edit settings",
+  "method": "zstd-19",
+  "orig": 508,
+  "out": 289,
+  "pct": 56.9,
+  "secs": 0,
+  "exact": true
+ }
+]

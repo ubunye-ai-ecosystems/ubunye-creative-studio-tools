@@ -124,6 +124,27 @@ One serving peer handles 25 simultaneous pulls; the 25-peer wall time is dominat
 ## E9. Memory while moving large media (`results/e9-media-memory.log`)
 553 MB original, client and server peers: peak resident memory **28.8 MB** (client) and **27.8 MB** (server). Verification overhead on the wire: 0.39% (555,854,799 bytes read for 553,691,975 of payload). This run's throughput was 33 Mbit/s because another process was deleting files on the same hard drive; the uncontended runs (E5) reached 1.2 to 1.7 Gbit/s.
 
+## E11. How far can compression go? (`results/e11-compression.json`, `lab/scenarios/e11_*.py`)
+Same PC. Sony ARW (uncompressed RAW, 24 MP, 14-bit), the camera JPEG of the same shot, and a develop-settings message.
+
+| What | Method | Size vs original | Time | Original bytes back exactly? |
+|---|---|---|---|---|
+| ARW file | zstd level 3 | 78% | 0.5 s | yes |
+| ARW file | xz level 9 | 57% | 27 s | yes |
+| ARW sensor data | JPEG XL lossless (4 Bayer planes) | 44% | 1.9 s | yes (pixels) |
+| ARW sensor data | JPEG-LS (4 Bayer planes) | 44% | 0.7 s | yes (pixels) |
+| **ARW "raw pack"**: JPEG-LS sensor + zstd for the rest of the file | **44.7 to 45.5% (2 files)** | **0.9 s pack, 0.8 s unpack** | **yes, byte-identical file** |
+| Camera JPEG | zstd level 19 | 98% | 0.9 s | yes |
+| ARW | proxy, JPEG q85, 2012×3012 | 1.1% | 0.05 s | no (preview for editing) |
+| ARW | proxy, JPEG XL d1.0, 2012×3012 | 0.9% | 4.4 s | no |
+| Develop settings (508 B) | zstd level 19 | 57% | 0 | yes |
+
+The noise floor: a simple left-neighbour predictor leaves 7.5 bits of entropy per 14-bit sample. JPEG-LS reaches about 7.1. What is left is mostly sensor noise, which no algorithm can predict, so heavier models (including LLM-based compressors such as LMCompress, which reports about 2× over JPEG XL on 8-bit photos) can only take a few more percent off camera RAW, at far higher cost. Not measured here.
+
+Not measured: JPEG XL's bit-exact JPEG repack (published at about 20% smaller); this imagecodecs build has no brunsli/JPEG-transcode codec. Other RAW formats (CR3, NEF lossless, Sony compressed RAW) are already compressed and will gain much less.
+
+**Decisions.** (1) Move uncompressed RAW originals as a "raw pack" (transport encoding only; the original's BLAKE3 stays its identity and is checked after unpacking). (2) Proxies first, originals on request: a 0.5 MB proxy is enough to start editing. (3) Do not compress edit messages; at 1.4 KB, round trips matter and bytes do not.
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).
