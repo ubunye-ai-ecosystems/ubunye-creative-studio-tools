@@ -107,6 +107,11 @@ impl Peer {
     async fn endpoint(&self, relay_only: bool, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
         let sk = SecretKey::from_bytes(&self.key.to_bytes());
         let mut b = Endpoint::builder(presets::N0).secret_key(sk).alpns(alpns);
+        if let Ok(u) = std::env::var("KOPANO_RELAY_URL") {
+            // Our own relay instead of n0's public ones.
+            let url: iroh::RelayUrl = u.parse().context("KOPANO_RELAY_URL")?;
+            b = b.relay_mode(iroh::endpoint::RelayMode::Custom(iroh::RelayMap::from(url)));
+        }
         if relay_only {
             // No direct UDP at all: every byte must go through the relay (worst-case NAT).
             b = b.clear_ip_transports();
