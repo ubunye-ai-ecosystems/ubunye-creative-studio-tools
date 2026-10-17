@@ -199,6 +199,40 @@ The speed limit both ways was this PC's internet line, not the protocol. Whether
 
 **What E13 changes.** (1) Kopano core stays app-neutral; the connector contract gains a `preview` capability: the app makes layer one with its own engine (Light: smart preview). Kopano moves it and the pack. (2) The RAW pack stays Kopano's (app-neutral, byte-exact, proven across OS). (3) Light smart previews are 8-bit JPEG inside; a 16-bit version could tighten the +2 EV case (a Light change, proposed only). Not tested yet: the desktop app's own window on the receiving side (only the headless engine), phones, a second real PC, a relay we run ourselves.
 
+## E14. Collaboration scenarios, our own relay, the full Light UI, phone size (`results/e14-*`, `kopano-lab/tests/collab_scenarios.rs`, `lab/scenarios/e14_relay_run.sh`)
+
+**Collaboration suite (25 scenarios, in process, every new version verified parents-first as the network pull does).** Test app with three lanes per photo (develop, selects, notes), like the Light connector. `cargo test -p kopano-lab --test collab_scenarios -- --nocapture --test-threads 1`, 27 s. **22 behave correctly, 3 are gaps.**
+
+| Group | Scenarios that behave correctly |
+|---|---|
+| Basic flow | A1 join and receive (50 photos, no media); A2 an edit reaches a teammate; A3 work passes through a teammate while its author is offline, still verified as the author's |
+| Working at the same time | B1 different photos; B2 same photo, different settings (both kept); B3 same setting (clash record keeps both, travels to everyone); B5 three people offline merged in two orders end identical; B6 delete vs edit (photo stays deleted, the edit is kept in a clash record, never silently lost); B7 two cards imported at once; B8 a week offline, 300 versions each on 2,000 photos, merged in 1.05 s; B9 ten people, 200 random edits, random pairwise syncs: everyone identical at the end |
+| Roles and permissions | C1 viewer refused; C2 client may comment, not edit; C3 retoucher limited to develop; C4 non-member refused; C5 a forbidden change hidden under a valid teammate's version refused; C6 a merge cannot smuggle a change; C7 one flipped bit rejected; C8 expired certificate refused |
+| History and recovery | D1 restore keeps history and teammates follow; D2 restore while a teammate edits: both survive; D3 a wiped laptop gets everything back from a teammate |
+
+| Gap | What we saw | What is needed |
+|---|---|---|
+| B4 resolving a clash | the clash record stays forever after someone picks a value (B9: 118 open records after 200 edits by 10 people) | a resolve step: a version that removes the record, allowed to whoever may write that lane |
+| C9 remove a member / stolen laptop | accepted until the certificate expires | signed membership log + device revocation list checked on every sync |
+| C10 add a member later | members are fixed at creation | the same membership log |
+
+Also seen: B8 saving took 22.5 s for 600 saves on 2,000 photos (37 ms each, the full-snapshot cost from E6); the change feed fixes it.
+
+**Our own relay.** `iroh-relay` v1.3.0 (n0's published binary, `--dev` mode) in a Vercel Sandbox in Cape Town behind its HTTPS route; the peer takes `KOPANO_RELAY_URL`. Alice on this PC (Johannesburg home line), Bob's peer built and run in the same sandbox. One small edit (4 objects, about 11.6 KB), 3 runs each, path as reported by iroh:
+
+| Route | Connect | Transfer |
+|---|---|---|
+| **Our relay, Cape Town** (relay only) | 83 to 150 ms | 237 to 247 ms |
+| n0 public relay, Frankfurt (relay only) | 837 to 1,635 ms | 879 to 1,674 ms |
+| Our relay, direct allowed | 81 to 153 ms | 182 to 247 ms (still relayed: the sandbox allowed no direct path) |
+| First sync of a 1,000-photo project, our relay | 118 ms | 1,127 ms (1,249 objects, 341 KB) |
+
+About 6 to 8 times faster than the European relay. Caveat: Bob sat next to the relay; two South African homes would both cross local networks. A sandbox is not a production host (45-minute limit); production needs a small always-on server in South Africa (proposed, not priced).
+
+**Full Light UI.** `lightcraft-cli snapshot` (the whole desktop app drawn headlessly, driven only through Light's control channel, as Light's own rules require) on the E13 layer-one library with the originals absent: the Develop view showed the photo from its smart preview, Exposure −1.50 applied, the filmstrip marked each photo as a smart preview, `originalOnline=false`. **Phone size (390 × 844):** the desktop layout breaks (photo shrinks to a thumbnail, top-bar icons overlap the search box). Light needs a phone layout; there is no phone build of Light or Kopano to test on a real phone.
+
+**Second PC at home.** Not possible to simulate here: virtualisation is off in this PC's firmware (no Windows Sandbox or Hyper-V). A cloud Windows machine would not share the home router. Needs a real second device.
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).

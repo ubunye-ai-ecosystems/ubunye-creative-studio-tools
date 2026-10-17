@@ -1,0 +1,25 @@
+{"detail":{"photos":50,"sync":"fast-forward, 150 items"},"result":"pass","scenario":"A1 a teammate joins and receives the whole project (no media)"}
+{"detail":{"sync":"fast-forward, 1 items"},"result":"pass","scenario":"A2 an edit reaches a teammate"}
+{"detail":{"sync":"fast-forward, 15 items"},"result":"pass","scenario":"A3 work passes on through a teammate while its author is offline (still verified as the author's)"}
+{"detail":{"clashes":0,"same_result_both_sides":true},"result":"pass","scenario":"B1 two people edit different photos at the same time"}
+{"detail":{"contrast":20,"exposure":0.5},"result":"pass","scenario":"B2 same photo, different settings: both changes kept"}
+{"detail":{"clash":["kopano/conflict/IMG_0001#develop/85fa2b78"],"kept_on_alice":0.9,"sync":"merged, 0 items, 1 clash(es)"},"result":"pass","scenario":"B3 same setting, different values: a clash record keeps both, nothing lost"}
+{"detail":{"needed":"a resolve step (a version that deletes the record, allowed to whoever may write the photo's lane)","observed":"after Alice picks a value the clash record stays forever; no call removes it"},"result":"gap","scenario":"B4 resolving a clash"}
+{"detail":{"identical":true,"orders_tried":2},"result":"pass","scenario":"B5 three people offline, merged in different orders: everyone ends with the same result"}
+{"detail":{"clash_records":1,"note":"delete vs edit must never silently drop the edit","photo_still_on_alice":false,"sync":"merged, 0 items, 1 clash(es)"},"result":"pass","scenario":"B6 one person deletes a photo while another edits it"}
+{"detail":{"photos_after":4},"result":"pass","scenario":"B7 two people import different cards at the same time"}
+{"detail":{"edit_s":22.5,"merge_and_back_s":1.05,"sync":"merged, 300 items, 0 clash(es)"},"result":"pass","scenario":"B8 a week offline: 300 versions each on 2,000 photos, then one merge"}
+{"detail":{"everyone_identical_at_the_end":true,"merges_with_clashes":93,"open_clash_records":118},"result":"pass","scenario":"B9 ten people, 200 random edits, random syncs between pairs"}
+{"detail":{"needed":"the same membership log as C9","observed":"members are fixed at creation (2 members); a new person needs a new project"},"result":"gap","scenario":"C10 adding someone to the project after it started"}
+{"detail":{"refused":true,"why":"alice refused version by vic: vic may not change the develop lane (version 7a6d2e56)"},"result":"pass","scenario":"C1 a viewer's edit is refused by everyone"}
+{"detail":{"comment":"fast-forward, 1 items","edit_refused":true,"why":"alice refused version by carl: carl may not change the develop lane (version ae0709b1)"},"result":"pass","scenario":"C2 a client may comment but not change the edit"}
+{"detail":{"develop":"fast-forward, 1 items","rating_refused":true,"why":"alice refused version by eve: eve may not change the selects lane (version 4ef0fc55)"},"result":"pass","scenario":"C3 a retoucher may change develop settings but not ratings"}
+{"detail":{"refused":true,"why":"alice refused version by mal: mal may not change the develop lane (version 2c1eccfd)"},"result":"pass","scenario":"C4 someone with a valid account who is not on the project is refused"}
+{"detail":{"refused":true,"why":"alice refused version by vic: vic may not change the selects lane (version 0fc7c79e)"},"result":"pass","scenario":"C5 a forbidden change hidden under a valid teammate's version is still refused"}
+{"detail":{"refused":true,"why":"alice refused version by eve: eve may not change the selects lane (version 61c77d53)"},"result":"pass","scenario":"C6 a merge cannot be used to smuggle in a change the author may not make"}
+{"detail":{"rejected":true},"result":"pass","scenario":"C7 a version changed on the way (one bit) is rejected by its fingerprint"}
+{"detail":{"refused":true,"why":"alice refused version by bob: device certificate for bob (laptop) has expired"},"result":"pass","scenario":"C8 a device whose certificate expired can no longer contribute"}
+{"detail":{"needed":"a signed membership log (add, remove, change role) and a device revocation list checked on every sync","observed":"accepted (fast-forward, 1 items); nothing can remove Bob or revoke his device until the certificate expires"},"result":"gap","scenario":"C9 removing a member, or blocking a stolen laptop"}
+{"detail":{"versions_in_history":4},"result":"pass","scenario":"D1 going back to an earlier version keeps the later one in history, and teammates follow"}
+{"detail":{"restored_value_kept":true,"teammate_edit_kept":true},"result":"pass","scenario":"D2 one person goes back in time while another keeps working: both survive"}
+{"detail":{"sync":"fast-forward, 600 items"},"result":"pass","scenario":"D3 a laptop is wiped; the person gets everything back from a teammate"}
