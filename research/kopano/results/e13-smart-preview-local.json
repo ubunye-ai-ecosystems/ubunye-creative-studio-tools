@@ -1,0 +1,7 @@
+[
+ {"camera": "Sony A7 III (owner)", "original_bytes": 49325568, "smart_preview_bytes": 670885, "areas_off_pct_ev-2_0_+2": [0.0, 1.06, 3.82], "mean_levels_off_ev-2_0_+2": [0.17, 0.34, 0.42]},
+ {"camera": "Canon 700D (owner)", "original_bytes": 22418128, "smart_preview_bytes": 598823, "areas_off_pct_ev-2_0_+2": [0.0, 0.9, 13.11], "mean_levels_off_ev-2_0_+2": [0.22, 0.42, 0.69]},
+ {"camera": "Nikon D5300 (owner)", "original_bytes": 19546842, "smart_preview_bytes": 777752, "areas_off_pct_ev-2_0_+2": [0.0, 0.24, 2.1], "mean_levels_off_ev-2_0_+2": [0.14, 0.24, 0.29]},
+ {"camera": "Fujifilm X-T4 lossless (CC0)", "original_bytes": 27949104, "smart_preview_bytes": 635995, "areas_off_pct_ev-2_0_+2": [0.17, 0.12, 2.52], "mean_levels_off_ev-2_0_+2": [0.12, 0.24, 0.33]},
+ {"camera": "Samsung S23 Ultra DNG (CC0)", "original_bytes": 31311854, "smart_preview_bytes": 1776528, "areas_off_pct_ev-2_0_+2": [0.0, 0.0, 0.0], "mean_levels_off_ev-2_0_+2": [0.04, 0.07, 0.12]}
+]

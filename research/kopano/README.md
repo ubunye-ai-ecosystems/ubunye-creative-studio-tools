@@ -29,7 +29,7 @@ This folder is research and a prototype, not product code. Branch: `research/kop
 | Two-peer sync over iroh 1.3 (direct and relay) | ✅ | ✅ | ✅ E5, E10 | own relay, presence hints | hole-punch rate on SA mobile networks |
 | Verified, resumable media transfer (iroh-blobs 0.103) | ✅ | ✅ | ✅ E5, E9 | pin+audit or own protocol on bao-tree | production fitness of iroh-blobs |
 | Chunking policy (whole file for originals, FastCDC 64 KiB for mutable docs) | benchmark only | | ✅ E2 | in the media layer | |
-| RAW pack for every camera (28/28 byte-identical, 13 brands; 42 to 99%) + progressive original (RAW-like 2560 px preview first) | lab Python + Rust `lj92` | ✅ 28 files | ✅ E11, E12 | in the media layer; per-format precomps (Nikon first) | GoPro preview (VC-5 decoder), real network run of the two layers |
+| RAW pack for every camera (28/28 byte-identical, 13 brands; 42 to 99%) + progressive original: layer one = the app's own preview (Light smart preview, 0.6 to 1.8 MB) | lab Python + Rust `lj92` | ✅ 28 files; ✅ Light engine; ✅ Cape Town Linux peer (4/4 identical, renders within 1/255) | ✅ E11, E12, E13 | `preview` capability in the connector contract; per-format precomps (Nikon first) | desktop app window on the receiver, phones, own relay, direct-vs-relay path |
 | Studio PC as always-on peer | | | | ✅ | |
 | Film used-segment range fetch | | | | ✅ | byte-range mapping |
 | Real two-machine, two-network test | | | | ✅ phase 3 | everything network-distance related beyond one relay |

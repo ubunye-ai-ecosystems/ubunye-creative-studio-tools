@@ -1,0 +1,34 @@
+[
+ {
+  "name": "canon-5d4-raw.CR2",
+  "sha256": "02b23f9cc6dc4c99fb39aa4d1f65ac227804d06461ac1bd0f842aa2f3beb8fe4",
+  "size": 33900585,
+  "packed": 28167266,
+  "method": "lj92",
+  "pack_s": 44.5
+ },
+ {
+  "name": "fuji-xt4-lossless.RAF",
+  "sha256": "07ea642656074834ffe5c661870a612ffa2e80fc1218a05166ee966bbe5f6fae",
+  "size": 27949104,
+  "packed": 26659654,
+  "method": "generic",
+  "pack_s": 19.9
+ },
+ {
+  "name": "nikon-z6-14bit-lossless.NEF",
+  "sha256": "c079345fc93f53a4f0d322f8ddaae505f920c36015f25b58befccaa61db1af31",
+  "size": 30164134,
+  "packed": 28673079,
+  "method": "generic",
+  "pack_s": 24.5
+ },
+ {
+  "name": "sony-a7m4-uncompressed.ARW",
+  "sha256": "bc0089c821a3711ebbeec3844cde5e5c247ac7cf9ca8ad9ae03a977b232216b2",
+  "size": 34177024,
+  "packed": 20119366,
+  "method": "sensor",
+  "pack_s": 34.3
+ }
+]

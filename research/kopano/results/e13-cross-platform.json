@@ -1,0 +1,206 @@
+[
+ {
+  "file": "canon-5d4-raw.CR2",
+  "ev": "-2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   2.31,
+   0.27
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "canon-5d4-raw.CR2",
+  "ev": "0",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   10.14,
+   0.46
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "canon-5d4-raw.CR2",
+  "ev": "2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   7.5,
+   0.39
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "fuji-xt4-lossless.RAF",
+  "ev": "-2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   0.17,
+   0.12
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "fuji-xt4-lossless.RAF",
+  "ev": "0",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   0.12,
+   0.24
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "fuji-xt4-lossless.RAF",
+  "ev": "2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   2.52,
+   0.33
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "nikon-z6-14bit-lossless.NEF",
+  "ev": "-2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   0.02,
+   0.18
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "nikon-z6-14bit-lossless.NEF",
+  "ev": "0",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   0.38,
+   0.34
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "nikon-z6-14bit-lossless.NEF",
+  "ev": "2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   8.47,
+   0.38
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "sony-a7m4-uncompressed.ARW",
+  "ev": "-2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   0.0,
+   0.08
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "sony-a7m4-uncompressed.ARW",
+  "ev": "0",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   0.0,
+   0.15
+  ],
+  "max_pixel_diff_original": 1
+ },
+ {
+  "file": "sony-a7m4-uncompressed.ARW",
+  "ev": "2",
+  "linux_vs_windows_original": [
+   0.0,
+   0.0
+  ],
+  "linux_vs_windows_smart": [
+   0.0,
+   0.0
+  ],
+  "linux_smart_vs_linux_original": [
+   0.0,
+   0.18
+  ],
+  "max_pixel_diff_original": 1
+ }
+]

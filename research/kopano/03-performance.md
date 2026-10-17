@@ -169,6 +169,36 @@ So edits made on layer one match the original far better than edits on a normal 
 
 Gaps, stated plainly: (1) GoPro GPR has no layer one (no embedded JPEG; needs GoPro's open-source VC-5 decoder). (2) Nikon HE and GPR get no RAW-like preview; Nikon HE gets a view-only 1.6 MB resized camera JPEG. (3) Formats with their own lossless codecs (Nikon lossless NEF, Sony lossless, Fujifilm, Panasonic, Olympus, Pentax PEF, Hasselblad, CR3) only gain from the JPEG-preview layer; each needs its own precomp like `lj92`, and the owner's Nikon D5300 is the first candidate (pixel headroom about 10%). (4) Lossy RAW (Sony lossy, Canon C-RAW) cannot be repacked much by any exact method. (5) The pack is lab Python + Rust, slow (about 1 to 2 min per file, mostly the zstd 19 fallback); production would use a faster level and run in the Kopano service. (6) The editor stand-in is a neutral render (WB, exposure, gamma), not the Light engine.
 
+## E13. Real use: the Light engine, a second machine in Cape Town, Linux (`results/e13-*`, `lab/scenarios/e13_*`)
+The owner asked whether E12 was tested in the real app and in another place. It was not: E12 used a stand-in renderer on one PC. E13 does it properly.
+
+**1. Looked at the images.** Rendered the same edit on the RAW, the E12 preview and a JPEG proxy and viewed them. The E12 preview recovered highlights like the RAW; the JPEG did not. But the stand-in renderer itself was crude (no colour profile, no rotation).
+
+**2. Light engine (`lightcraft-cli`), this PC.** The E12 preview, written as a linear DNG, opened in Light but rendered about one stop darker and warmer than the RAW at every exposure (95 to 100% of areas off). Cause: Light develops each camera with its own baseline exposure, colour fit and tone curve, which a generic file does not carry. **Correction: layer one must come from the app's own engine.** Light already has this: Smart Previews (`library.smartPreviews`, `crates/engine/src/smart.rs`), about 0.6 to 1.8 MB, editable while the original is offline. Measured on 5 cameras (3 of the owner's), original hidden, same edit:
+
+| | Exposure −2 | No edit | Exposure +2 |
+|---|---|---|---|
+| Areas off by more than 2/255 | 0 to 0.2% | 0 to 1.1% | 0 to 13% (Canon 700D) |
+| Mean difference (levels of 255) | 0.04 to 0.22 | 0.07 to 0.42 | 0.12 to 0.69 |
+
+Viewed side by side: no visible difference at screen size; at 100% the smart preview is slightly softer (it is smaller than the 2560 px export and is upscaled).
+
+**3. Second machine, another city, another OS.** A Vercel Sandbox in Cape Town (cpt1; Ubuntu 26.04, 4 vCPU), driven with the Vercel CLI. Only CC0 samples left this PC (Canon 5D IV CR2, Sony A7 IV ARW, Nikon Z6 lossless NEF, Fujifilm X-T4 RAF). Transfer: `sendme` 0.36.0 (n0's iroh + iroh-blobs tool, same stack as Kopano's peer), Johannesburg home connection to Cape Town.
+
+| Step | Result |
+|---|---|
+| Light built from source on Linux (`develop`, b94bf8b) | 234 s; zig as the C linker (the image's apt could not verify signatures; not bypassed) |
+| Layer one: Light library + 4 smart previews, 3.4 MB | received in **11.2 s** (incl. start-up and finding the peer) |
+| Light on Linux, originals absent | developed all 4 photos at −2/0/+2 from the smart previews (`originalOnline=false`), 6 s |
+| Layer two: 4 packs, 104 MB (from 126 MB of originals) | received in **308 s (about 2.7 Mbit/s)** |
+| Unpack on Linux, SHA-256 against this PC's manifest | **4 of 4 byte-identical** (lj92, sensor, generic), 0.3 to 1.6 s each |
+| Light on Linux vs Light on Windows, same files and edits | **max pixel difference 1/255** in all 24 renders (rounding; builds differ: b94bf8b vs dfc548bc) |
+| Renders sent back Cape Town → this PC, 155 MB | 425 s (about 2.9 Mbit/s) |
+
+The speed limit both ways was this PC's internet line, not the protocol. Whether iroh went direct or through a relay was not recorded. Two early failures were mine (a crashed background `sendme`, which needs a terminal, and a mis-copied ticket), not the network.
+
+**What E13 changes.** (1) Kopano core stays app-neutral; the connector contract gains a `preview` capability: the app makes layer one with its own engine (Light: smart preview). Kopano moves it and the pack. (2) The RAW pack stays Kopano's (app-neutral, byte-exact, proven across OS). (3) Light smart previews are 8-bit JPEG inside; a 16-bit version could tighten the +2 EV case (a Light change, proposed only). Not tested yet: the desktop app's own window on the receiving side (only the headless engine), phones, a second real PC, a relay we run ourselves.
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).
