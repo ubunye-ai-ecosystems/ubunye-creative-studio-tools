@@ -22,7 +22,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 const ALPN: &[u8] = b"kopano/lab-agent/0";
-const ALLOWED: [&str; 6] = ["pull", "fetch-media", "edit", "status", "verify", "hash-of"];
+const ALLOWED: [&str; 7] = ["pull", "fetch-media", "edit", "status", "verify", "hash-of", "render"];
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -212,7 +212,7 @@ if ($c.IsUnknown) { $lat = 'null'; $lon = 'null'; $acc = 'null' } else { $lat = 
                 }
                 // A received file may only be saved as <package>/received/<plain name>.
                 if let Some(name) = req.get("save_as").and_then(Value::as_str) {
-                    if sub != "fetch-media" || name.is_empty() || name.len() > 100 || name.contains("..")
+                    if !(sub == "fetch-media" || sub == "render") || name.is_empty() || name.len() > 100 || name.contains("..")
                         || !name.chars().all(|c| c.is_ascii_alphanumeric() || " ._-".contains(c))
                     {
                         bail!("bad save_as name");

@@ -19,3 +19,4 @@ iroh.workspace = true
 iroh-blobs.workspace = true
 rand.workspace = true
 redb = "4"
+image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }

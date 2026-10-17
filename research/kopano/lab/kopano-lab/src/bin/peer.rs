@@ -449,6 +449,71 @@ async fn save_blob(blobs: &iroh_blobs::store::fs::FsStore, h: iroh_blobs::Hash, 
     Ok(())
 }
 
+/// Make the "final image" of one photo from this device's own synced settings (lab check that
+/// devices agree): the camera's embedded JPEG, with exposure, contrast and white balance applied.
+async fn render(dir: &Path, key: &str, out: &Path) -> Result<()> {
+    let peer = Peer::open(dir)?;
+    let app = peer.app()?;
+    let item = app.photos.get(key).with_context(|| format!("no photo {key}"))?;
+    let d = &item.state["develop"];
+    let ev = d["exposure"].as_f64().unwrap_or(0.0) as f32;
+    let contrast = d["contrast"].as_f64().unwrap_or(0.0) as f32;
+    let temp = d["temperature"].as_f64().unwrap_or(5500.0) as f32;
+    let hash = &item.assets.first().context("no original")?.hash;
+    let blobs = peer.blobs().await?;
+    let h: iroh_blobs::Hash = hash.parse()?;
+    if !blobs.remote().local(h).await?.is_complete() {
+        bail!("the original of {key} is not on this device yet; fetch it first");
+    }
+    let tmp = std::path::absolute(dir.join("render-original.tmp"))?;
+    blobs.blobs().export(h, &tmp).await?;
+    blobs.shutdown().await?;
+    let bytes = std::fs::read(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
+    // the largest JPEG the camera embedded in the raw file
+    let mut best: Option<image::DynamicImage> = None;
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == 0xFF && bytes[i + 1] == 0xD8 && bytes[i + 2] == 0xFF {
+            if let Ok(img) = image::load_from_memory_with_format(&bytes[i..], image::ImageFormat::Jpeg) {
+                if best.as_ref().map_or(true, |b| img.width() * img.height() > b.width() * b.height()) {
+                    best = Some(img);
+                }
+            }
+        }
+        i += 1;
+        if best.as_ref().is_some_and(|b| b.width() >= 4000) {
+            break;
+        }
+    }
+    let img = best.context("no embedded JPEG in the original")?.to_rgb8();
+    let (w, hgt) = (img.width() as f32, img.height() as f32);
+    let k = 1600.0 / w.max(hgt);
+    let mut img = image::imageops::resize(&img, (w * k).round() as u32, (hgt * k).round() as u32, image::imageops::FilterType::Triangle);
+    let gain = 2f32.powf(ev);
+    let shift = (temp - 5500.0) / 8000.0;
+    let (rk, bk) = ((1.0 + shift).max(0.0), (1.0 - shift).max(0.0));
+    let ck = 1.0 + contrast / 100.0;
+    for p in img.pixels_mut() {
+        for (c, m) in [(0usize, rk), (1, 1.0), (2, bk)] {
+            let lin = (p[c] as f32 / 255.0).powf(2.2) * gain * m;
+            let s = lin.clamp(0.0, 1.0).powf(1.0 / 2.2);
+            let s = ((s - 0.5) * ck + 0.5).clamp(0.0, 1.0);
+            p[c] = (s * 255.0).round() as u8;
+        }
+    }
+    let out = std::path::absolute(out)?;
+    if let Some(p) = out.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let mut f = std::fs::File::create(&out)?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut f, 88).encode_image(&img)?;
+    drop(f);
+    let fp = blake3::hash(&std::fs::read(&out)?).to_hex().to_string();
+    println!("{{\"event\":\"render\",\"key\":\"{key}\",\"exposure\":{ev},\"contrast\":{contrast},\"temperature\":{temp},\"width\":{},\"height\":{},\"fingerprint\":\"{}\"}}", img.width(), img.height(), &fp[..16]);
+    Ok(())
+}
+
 /// Offer any file to the team as media (lab): prints its BLAKE3 hash.
 async fn add_media(dir: &Path, file: &Path) -> Result<()> {
     let peer = Peer::open(dir)?;
@@ -638,6 +703,7 @@ async fn main() -> Result<()> {
             }
             fetch_media(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &h, relay_only, arg(&args, "--out").map(PathBuf::from)).await
         }
+        "render" => render(&need_dir()?, &arg(&args, "--key").context("--key")?, Path::new(&arg(&args, "--out").context("--out")?)).await,
         "add-media" => add_media(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "edit" => edit(
             &need_dir()?,
