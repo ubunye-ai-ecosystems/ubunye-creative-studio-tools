@@ -145,6 +145,30 @@ Not measured: JPEG XL's bit-exact JPEG repack (published at about 20% smaller); 
 
 **Decisions.** (1) Move uncompressed RAW originals as a "raw pack" (transport encoding only; the original's BLAKE3 stays its identity and is checked after unpacking). (2) Proxies first, originals on request: a 0.5 MB proxy is enough to start editing. (3) Do not compress edit messages; at 1.4 KB, round trips matter and bytes do not.
 
+## E12. RAW pack for every camera + progressive original (`results/e12-*`, `lab/scenarios/rawpack.py`, `lab/kopano-lab/src/bin/lj92.rs`)
+28 RAW files: 24 public CC0 samples from raw.pixls.us (13 brands: Canon CR2/CR3, Nikon NEF incl. HE, Fujifilm, Panasonic, Olympus, Pentax PEF/DNG, Sony, Leica, Hasselblad, Phase One, Apple, Google, Samsung, DJI, GoPro) plus 4 of the owner's own (Sony A7 III, Canon 700D, Nikon D5300, a Lightroom DNG). Same PC as above.
+
+**Rule: every camera works.** `pack` tries methods from best to plainest and keeps the smallest one whose unpack gives back the original file byte for byte; storing the file as it is always qualifies. Result: **28 of 28 byte-identical**, including the two formats the RAW decoder cannot read (GoPro GPR, Nikon HE).
+
+| Method | What it does | Where it applied | Packed size |
+|---|---|---|---|
+| `sensor` | finds plainly stored sensor samples (16-bit LE/BE or bit-packed, any row stride), JPEG-LS per colour plane | uncompressed Sony, Nikon, Fujifilm, Leica, DJI | **42 to 59%** |
+| `lj92` | precomp for lossless JPEG: decode every stream, re-encode with the file's own tables, accept only if the bytes match, then JPEG-LS on the samples | Canon CR2, Apple/Google/Samsung/Pentax/Lightroom DNG | **82 to 90%** (97% for the Lightroom DNG, mostly non-RAW data) |
+| `generic` | embedded JPEG previews repacked by JPEG XL (byte-exact), the rest zstd 19 | everything else (CR3, Fuji compressed, Nikon lossless/HE, Panasonic, Olympus, Pentax PEF, Hasselblad, Phase One, Sony lossless/lossy, GoPro) | **87 to 99%** |
+
+Total: **936 MB to 729 MB (77.9%)**. The `lj92` tool rebuilt every stream it found on the first attempt (0 rejected), including tiled DNGs (192 and 384 tiles), the iPhone's predictor 7 and Samsung's restart markers. Camera JPEGs repack to 78% byte-exactly (closes the E11 open item).
+
+**Progressive original.** Layer one is a 2560 px preview of linear camera data (no white balance, no clipping, no tone curve), gamma-encoded and stored as 16-bit JPEG XL at distance 0.7: **83 KB to 1.3 MB, median about 330 KB**. Layer two is the pack. Edit test: the same edit (exposure −2, +2, warmer white balance) applied to the preview and to the full RAW at the same size, counting 8×8 areas whose average colour differs by more than 2 levels of 255:
+
+| | Areas off, exposure +2 (worst case) | Areas off, warmer WB |
+|---|---|---|
+| RAW-like preview (ours) | median about 0.5%, worst 4.9% (Samsung), 2.9% (Panasonic) | under 0.2% on the owner's files |
+| 8-bit JPEG preview (the usual shortcut), q90 | 4 to 19% | up to 3.3% |
+
+So edits made on layer one match the original far better than edits on a normal JPEG proxy, at a smaller size. Times to receive each layer are in `results/e12-summary.md` (arithmetic from measured bytes, not a network run): at 10 Mbit/s layer one takes 0.1 to 1 s and layer two 4 s to 1 min.
+
+Gaps, stated plainly: (1) GoPro GPR has no layer one (no embedded JPEG; needs GoPro's open-source VC-5 decoder). (2) Nikon HE and GPR get no RAW-like preview; Nikon HE gets a view-only 1.6 MB resized camera JPEG. (3) Formats with their own lossless codecs (Nikon lossless NEF, Sony lossless, Fujifilm, Panasonic, Olympus, Pentax PEF, Hasselblad, CR3) only gain from the JPEG-preview layer; each needs its own precomp like `lj92`, and the owner's Nikon D5300 is the first candidate (pixel headroom about 10%). (4) Lossy RAW (Sony lossy, Canon C-RAW) cannot be repacked much by any exact method. (5) The pack is lab Python + Rust, slow (about 1 to 2 min per file, mostly the zstd 19 fallback); production would use a faster level and run in the Kopano service. (6) The editor stand-in is a neutral render (WB, exposure, gamma), not the Light engine.
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).

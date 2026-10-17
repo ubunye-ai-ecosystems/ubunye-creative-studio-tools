@@ -29,7 +29,7 @@ This folder is research and a prototype, not product code. Branch: `research/kop
 | Two-peer sync over iroh 1.3 (direct and relay) | ✅ | ✅ | ✅ E5, E10 | own relay, presence hints | hole-punch rate on SA mobile networks |
 | Verified, resumable media transfer (iroh-blobs 0.103) | ✅ | ✅ | ✅ E5, E9 | pin+audit or own protocol on bao-tree | production fitness of iroh-blobs |
 | Chunking policy (whole file for originals, FastCDC 64 KiB for mutable docs) | benchmark only | | ✅ E2 | in the media layer | |
-| RAW pack (byte-identical uncompressed ARW at 45%), proxies first | script only | ✅ 2 files | ✅ E11 | in the media layer | other RAW formats, JPEG XL JPEG repack |
+| RAW pack for every camera (28/28 byte-identical, 13 brands; 42 to 99%) + progressive original (RAW-like 2560 px preview first) | lab Python + Rust `lj92` | ✅ 28 files | ✅ E11, E12 | in the media layer; per-format precomps (Nikon first) | GoPro preview (VC-5 decoder), real network run of the two layers |
 | Studio PC as always-on peer | | | | ✅ | |
 | Film used-segment range fetch | | | | ✅ | byte-range mapping |
 | Real two-machine, two-network test | | | | ✅ phase 3 | everything network-distance related beyond one relay |
