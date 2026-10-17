@@ -1,0 +1,3 @@
+{"event":"setup","project":"7be43eba","first_version":"ab25a517","originals":1}
+{"event":"media","hash":"ee9b2d2b","path":"Ip(LAN-ADDR)","connect_ms":474,"had_before":0,"bytes_received":553691975,"total_read":555854799,"ms":134125,"mbit_s":33,"complete":true}
+{"file_mb": 553, "client_peak_rss_mb": 28.8, "server_rss_before_mb": 25.6, "server_peak_rss_mb": 27.8}

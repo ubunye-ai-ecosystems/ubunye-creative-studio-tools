@@ -1,0 +1,5 @@
+N=10000 setup+first save 2.8s {"event":"setup","project":"3600f2fc","first_version":"56177b19","originals":0}
+  alice db bytes 5623808
+  bob first sync wall 4.0s {"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":6,"transfer_ms":318,"verify_ms":66,"objects":10258,"bytes":3302683,"rounds":4,"media_bytes":0,"result":"fast-forward, 10000 item(s) applied"}
+  alice small edit wall 0.65s {"event":"edit","who":"Alice","key":"IMG_0000042.ARW","field":"develop.exposure","value":0.3,"version":"c3e30704","save_ms":264.3}
+  bob incremental wall 3.69s {"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":9,"transfer_ms":18,"verify_ms":0,"objects":4,"bytes":13676,"rounds":4,"media_bytes":0,"result":"fast-forward, 1 item(s) applied"}

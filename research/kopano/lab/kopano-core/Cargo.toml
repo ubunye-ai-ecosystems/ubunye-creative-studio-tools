@@ -1,0 +1,16 @@
+[package]
+name = "kopano-core"
+description = "Kopano prototype core: content-addressed objects, manifest trie, signed versions, merge, connector contract. No networking, no app knowledge."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+rand.workspace = true
+redb = "4"
+serde.workspace = true
+serde_json.workspace = true

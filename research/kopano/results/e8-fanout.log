@@ -1,0 +1,4 @@
+{"peers": 2, "applied": 2, "all_done_s": 1.36, "transfer_ms_max": 34, "transfer_ms_median": 34}
+{"peers": 5, "applied": 5, "all_done_s": 1.32, "transfer_ms_max": 66, "transfer_ms_median": 46}
+{"peers": 10, "applied": 10, "all_done_s": 1.39, "transfer_ms_max": 158, "transfer_ms_median": 146}
+{"peers": 25, "applied": 25, "all_done_s": 5.7, "transfer_ms_max": 563, "transfer_ms_median": 136}

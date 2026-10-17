@@ -1,0 +1,6 @@
+{"mode": "levels", "path": "Relay(https://euc1-1.relay.n0.iroh.link./)", "connect_ms": 50725, "transfer_ms": 7658, "objects": 3, "bytes": 1502, "rounds": 3, "result": "fast-forward, 1 item(s) applied", "error": null}
+{"mode": "closure", "path": "Relay(https://euc1-1.relay.n0.iroh.link./)", "connect_ms": 1225, "transfer_ms": 2132, "objects": 3, "bytes": 1501, "rounds": 1, "result": "fast-forward, 1 item(s) applied", "error": null}
+{"mode": "levels", "path": "Relay(https://euc1-1.relay.n0.iroh.link./)", "connect_ms": 1401, "transfer_ms": 2865, "objects": 3, "bytes": 1502, "rounds": 3, "result": "fast-forward, 1 item(s) applied", "error": null}
+{"mode": "closure", "path": "Relay(https://euc1-1.relay.n0.iroh.link./)", "connect_ms": 1183, "transfer_ms": 2558, "objects": 3, "bytes": 1501, "rounds": 1, "result": "fast-forward, 1 item(s) applied", "error": null}
+{"mode": "levels", "path": "Relay(https://euc1-1.relay.n0.iroh.link./)", "connect_ms": 1192, "transfer_ms": 3252, "objects": 3, "bytes": 1502, "rounds": 3, "result": "fast-forward, 1 item(s) applied", "error": null}
+{"mode": "closure", "path": "Relay(https://euc1-1.relay.n0.iroh.link./)", "connect_ms": 1175, "transfer_ms": 2276, "objects": 3, "bytes": 1501, "rounds": 1, "result": "fast-forward, 1 item(s) applied", "error": null}

@@ -1,0 +1,78 @@
+
+### 1. Setup: provider, devices for Alice, Bob, Carol; project owned by Alice, Bob is editor of the develop lane; Carol is not a member
+{"event":"setup","project":"38954eb9","first_version":"39f5effd","originals":4}
+  DSC02384.ARW: b266c5c88a9d… 49 MB
+  DSC02385.ARW: e01261f8a45b… 49 MB
+  DSC02393.ARW: 40fbe390b746… 49 MB
+  C0027.MP4: ee9b2d2b8deb… 553 MB
+
+### 2. Alice comes online
+[serve] Alice online in 3762 ms, addr written
+
+### 3. Bob joins: pulls history and edit state (no media)
+{"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":6,"transfer_ms":6,"verify_ms":0,"objects":6,"bytes":2211,"rounds":3,"media_bytes":0,"result":"fast-forward, 4 item(s) applied"}
+
+### 4. Bob already has the photo originals from the card: nothing to transfer
+{"event":"media","hash":"b266c5c8","already_complete":true,"bytes_received":0}
+
+### 5. Alice makes a small edit; Bob pulls it (bytes for one exposure change)
+{"event":"edit","who":"Alice","key":"DSC02384.ARW","field":"develop.exposure","value":0.35,"version":"2471e97b","save_ms":7.5}
+{"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":5,"transfer_ms":3,"verify_ms":0,"objects":3,"bytes":1438,"rounds":3,"media_bytes":0,"result":"fast-forward, 1 item(s) applied"}
+
+### 6. Same over the relay only (no direct path allowed): worst-case NAT
+{"event":"edit","who":"Alice","key":"DSC02384.ARW","field":"develop.temperature","value":5900,"version":"beb85d98","save_ms":7.5}
+{"event":"pull","path":"Relay(https://euc1-1.relay.n0.iroh.link./)","connect_ms":1199,"transfer_ms":2641,"verify_ms":1,"objects":3,"bytes":1431,"rounds":3,"media_bytes":0,"result":"fast-forward, 1 item(s) applied"}
+
+### 7. Carol has a valid account but is not a member: refused
+    closed by peer: 0
+    failed to open stream pair: closed by peer: permission (code 1)
+
+### 8. Bob fetches the video original; the transfer is killed part way; then resumed
+(killed the transfer after 1.5 s)
+{"event":"media","hash":"ee9b2d2b","path":"Ip(LAN-ADDR)","connect_ms":4,"had_before":258310144,"bytes_received":295381831,"total_read":296536207,"ms":4808,"mbit_s":1692,"complete":true}
+{"event":"media","hash":"ee9b2d2b","already_complete":true,"bytes_received":0}
+
+### 9. Concurrent edits, different settings: Alice exposure, Bob contrast, offline from each other
+{"event":"edit","who":"Alice","key":"DSC02384.ARW","field":"develop.exposure","value":0.6,"version":"fa9ef79c","save_ms":75.0}
+{"event":"edit","who":"Bob","key":"DSC02384.ARW","field":"develop.contrast","value":25,"version":"d4c66ee5","save_ms":8.5}
+{"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":9,"transfer_ms":5,"verify_ms":1,"objects":3,"bytes":1432,"rounds":3,"media_bytes":0,"result":"merged as 21c466fb, 1 item(s) applied, 0 clash(es): "}
+
+### 10. Concurrent edits, same setting: Alice exposure 0.9, Bob exposure -0.4
+{"event":"edit","who":"Alice","key":"DSC02384.ARW","field":"develop.exposure","value":0.9,"version":"c2f3c80b","save_ms":12.6}
+{"event":"edit","who":"Bob","key":"DSC02384.ARW","field":"develop.exposure","value":-0.4,"version":"8ad450bc","save_ms":10.0}
+{"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":5,"transfer_ms":3,"verify_ms":0,"objects":3,"bytes":1437,"rounds":3,"media_bytes":0,"result":"merged as cfd928b5, 0 item(s) applied, 1 clash(es): DSC02384.ARW [Develop exposure]"}
+Bob on Wedding shoot (lab) — head cfd928b5
+  cfd928b5  Bob    Merged with 1 clash(es) kept for review       lanes=["kopano.conflicts"]
+  8ad450bc  Bob    Darker, moodier                               lanes=["develop"]
+  c2f3c80b  Alice  Much brighter                                 lanes=["develop"]
+  21c466fb  Bob    Merged                                        lanes=["develop"]
+  d4c66ee5  Bob    More contrast                                 lanes=["develop"]
+  fa9ef79c  Alice  Brighter                                      lanes=["develop"]
+  beb85d98  Alice  Warmer                                        lanes=["develop"]
+  2471e97b  Alice  Lift exposure                                 lanes=["develop"]
+  39f5effd  Alice  Imported the shoot                            lanes=["develop"]
+  item C0027.MP4: exposure=0.0 contrast=0.0 rating=0
+  item DSC02384.ARW: exposure=-0.4 contrast=25.0 rating=0
+  item DSC02385.ARW: exposure=0.0 contrast=0.0 rating=0
+  item DSC02393.ARW: exposure=0.0 contrast=0.0 rating=0
+  CLASH kopano/conflict/DSC02384.ARW/d04da698: fields=["Develop exposure"] mine=aa84955c theirs=d04da698
+
+### 11. Alice pulls from Bob: gets the merge and the open clash record
+{"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":5,"transfer_ms":10,"verify_ms":9,"objects":12,"bytes":5950,"rounds":6,"media_bytes":0,"result":"fast-forward, 1 item(s) applied"}
+Alice on Wedding shoot (lab) — head cfd928b5
+  cfd928b5  Bob    Merged with 1 clash(es) kept for review       lanes=["kopano.conflicts"]
+  8ad450bc  Bob    Darker, moodier                               lanes=["develop"]
+  c2f3c80b  Alice  Much brighter                                 lanes=["develop"]
+
+### 12. Integrity: a byte of Bob's newest version rots on disk; detect, repair, re-fetch
+{"event":"corrupt","object":"cfd928b5"}
+{"event":"verify","objects":31,"damaged":["cfd928b593545a702d73cdeb023e12c5796fe434271043abd12a8d0c5d891eb0"]}
+{"event":"repair","removed_damaged":1}
+{"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":8,"transfer_ms":9,"verify_ms":1,"objects":1,"bytes":1055,"rounds":1,"media_bytes":0,"result":"already up to date"}
+{"event":"verify","objects":31,"damaged":[]}
+
+### 13. Alice goes offline mid-session; Bob's pull fails cleanly; Alice returns; pull succeeds
+(exit 0)
+{"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":6,"transfer_ms":1,"verify_ms":0,"objects":0,"bytes":0,"rounds":0,"media_bytes":0,"result":"already up to date"}
+
+### done

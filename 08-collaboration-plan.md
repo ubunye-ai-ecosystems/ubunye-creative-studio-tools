@@ -1,6 +1,35 @@
 # 08 · Ubunye Projects: collaboration and version history plan
 
-Status: **parked as a long-term to-do** (owner, 2026-10-12). Proposal only; nothing here is built yet. Tracked as Milestone 8 in [07-implementation-plan.md](07-implementation-plan.md). Working name for the protocol: **Kopano** (Sesotho for "gathering"). The product name in the apps stays "Ubunye Projects".
+Status: **un-parked for research** (owner, 2026-10-17). The original plan below (written 2026-10-12, before any code or measurement) is kept as it was. Read the revision first: it records what changed and why. Tracked as Milestone 8 in [07-implementation-plan.md](07-implementation-plan.md). Working name for the protocol: **Kopano** (Sesotho for "gathering"). The product name in the apps stays "Ubunye Projects".
+
+## Revision 2026-10-17: what research and experiments changed
+
+Full evidence: [`research/kopano/`](research/kopano/README.md) (baseline, architecture decisions, performance report with raw results, proof of concept, roadmap). Prototype code: `research/kopano/lab/` (Rust).
+
+**Owner decisions since 12 October**
+- Kopano must be application-neutral (it must not be built on top of one app) and work for future apps.
+- Use the existing ThabangVision accounts, GitHub-style. No hosting of creative files in the cloud; a studio PC may be the always-on peer.
+
+**What changed in the plan, and why**
+
+| 12 October said | Now | Why (evidence) |
+|---|---|---|
+| ed25519 key per person (§6) | key per **device**, vouched for by a short-lived device certificate signed by the identity provider (ThabangVision first). The same key is the device's iroh id and signs its versions | owner decision; ThabangVision has no device sign-in today and its Supabase JWTs are unsuitable for peers (audit). Tested in the prototype |
+| Mailbox on R2 recommended (§5) | dropped as a default. Studio PC = ordinary always-on peer. Relays forward encrypted packets and store nothing; production needs our own relay (n0's public relays are dev-only) | owner rule; iroh relay terms |
+| Media transfer via iroh-blobs (§4, §7) | still the best fit, but iroh-blobs 0.103 is "not production quality" (its README) and had a disk-fill bug fixed 2026-10-06. Kept behind an interface; pin-and-audit or reimplement on `bao-tree` before phase 3 | tech assessment; E5 shows it works and resumes |
+| Chunking implied for everything | camera originals hashed whole (immutable). FastCDC ~64 KiB only for documents that change in place. Photo tiles are already content-addressed. Re-encoded media gains nothing | measured E2 on real ARW/JPEG/MP4 |
+| Version lists photos | versions point to a canonical hash-trie manifest | measured E4: 1M items, one edit writes 23 KB (flat list: 55 MB) |
+| Objects as files | one embedded ACID database (redb) per device, one transaction per save | measured E7: 64× faster writes on Windows; per-object files took 447 s to save 100k items |
+| Lanes per role, merge never inside a lane | kept, plus per-setting three-way merge for kinds the app declares mergeable; clashes become conflict records holding both sides | tested in conformance and two-process PoC |
+| Connector = Rust adapter trait with 4 jobs (§8) | 5-call contract with version, declared kinds and a change feed; JSON-RPC over each app's existing control port, so no upstream edits; conformance kit of 7 checks | Light's real engine passes all 7 |
+| Facts about Photo and Film in §7/§8 | six were wrong or partial (e.g. Photo `Services` is a struct, Film uses `source_for`, both apps already have notes/markers) | see research/kopano/01-baseline.md §5 |
+| Estimates in weeks (§10) | replaced by phases with entry/exit tests, sized S to XL | estimates were pre-measurement |
+
+**Still open:** real two-machine tests on separate networks, relay cost, membership changes and revocation, Film stable ids, the ThabangVision link flow (migration 098). Answers to the five owner decisions in §14 are partly given (name: Kopano; mailbox: no cloud; originals: stay local; order: Light first); §14.5 (first test creatives) is still open.
+
+---
+
+*Original plan (2026-10-12) follows, unchanged.*
 
 ## 1. The goal in one scenario
 

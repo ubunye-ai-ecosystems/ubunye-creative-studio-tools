@@ -1,0 +1,9 @@
+levels reset (1.7685279846191406, '{"event":"reset"}')
+levels first sync wall 9.7s {"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":5,"transfer_ms":4770,"verify_ms":1016,"objects":151548,"bytes":35271511,"rounds":5,"media_bytes":0,"result":"fast-forward, 100000 item(s) applied"}
+closure reset (0.24786710739135742, '{"event":"reset"}')
+closure first sync wall 9.9s {"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":7,"transfer_ms":4786,"verify_ms":1054,"objects":151548,"bytes":35271511,"rounds":1,"media_bytes":0,"result":"fast-forward, 100000 item(s) applied"}
+alice small edit wall 3.46s {"event":"edit","who":"Alice","key":"IMG_0000042.ARW","field":"develop.exposure","value":0.31,"version":"1685cefd","save_ms":1694.0}
+bob incremental (closure) wall 6.06s {"event":"pull","path":"Ip(LAN-ADDR)","connect_ms":7,"transfer_ms":11,"verify_ms":0,"objects":5,"bytes":20259,"rounds":1,"media_bytes":0,"result":"fast-forward, 1 item(s) applied"}
+[serve] Alice online in 3747 ms, addr written
+[serve] Bob (laptop) connected
+

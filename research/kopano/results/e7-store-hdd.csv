@@ -1,0 +1,4 @@
+store,n,write_ms,read_ms,write_objs_per_s,read_objs_per_s,disk_bytes
+files,20000,22519,2033,888,9836,6488890
+redb-batched,20000,938,35,21315,573541,33689600
+redb-per-object,2000,141355,,14,,

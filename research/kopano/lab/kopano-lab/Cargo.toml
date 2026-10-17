@@ -1,0 +1,21 @@
+[package]
+name = "kopano-lab"
+description = "Kopano experiments: benchmarks, a toy image connector, and the two-peer iroh prototype."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+fastcdc.workspace = true
+hex.workspace = true
+kopano-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+iroh.workspace = true
+iroh-blobs.workspace = true
+rand.workspace = true
+redb = "4"
