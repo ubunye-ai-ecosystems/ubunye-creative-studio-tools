@@ -210,6 +210,18 @@ if ($c.IsUnknown) { $lat = 'null'; $lon = 'null'; $acc = 'null' } else { $lat = 
                         full.push(self.dir.join(Path::new(f).file_name().context("bad --from")?).display().to_string());
                     }
                 }
+                // A received file may only be saved as <package>/received/<plain name>.
+                if let Some(name) = req.get("save_as").and_then(Value::as_str) {
+                    if sub != "fetch-media" || name.is_empty() || name.len() > 100 || name.contains("..")
+                        || !name.chars().all(|c| c.is_ascii_alphanumeric() || " ._-".contains(c))
+                    {
+                        bail!("bad save_as name");
+                    }
+                    let root = self.dir.parent().and_then(Path::parent).context("package folder")?;
+                    full.push("--out".into());
+                    full.push(root.join("received").join(name).display().to_string());
+                    println!("{}  receiving a file: received/{name}", now());
+                }
                 let timeout = req.get("timeout_s").and_then(Value::as_u64).unwrap_or(600);
                 let g = self.busy.lock().await;
                 self.stop_serve().await;

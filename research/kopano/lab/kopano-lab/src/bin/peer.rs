@@ -403,13 +403,16 @@ async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool) -> Resul
     Ok(())
 }
 
-async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool) -> Result<()> {
+async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out: Option<PathBuf>) -> Result<()> {
     let peer = Peer::open(dir)?;
     let blobs = peer.blobs().await?;
     let h: iroh_blobs::Hash = hash.parse()?;
     let before = blobs.remote().local(h).await?;
     let had = before.local_bytes();
     if before.is_complete() {
+        if let Some(o) = &out {
+            save_blob(&blobs, h, o).await?;
+        }
         println!("{{\"event\":\"media\",\"hash\":\"{}\",\"already_complete\":true,\"bytes_received\":0}}", &hash[..8]);
         return Ok(());
     }
@@ -420,6 +423,9 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool) -> R
     let after = blobs.remote().local(h).await?;
     conn.close(0u32.into(), b"done");
     ep.close().await;
+    if let (Some(o), true) = (&out, after.is_complete()) {
+        save_blob(&blobs, h, o).await?;
+    }
     println!(
         "{{\"event\":\"media\",\"hash\":\"{}\",\"path\":{:?},\"connect_ms\":{connect_ms},\"had_before\":{had},\"bytes_received\":{},\"total_read\":{},\"ms\":{ms},\"mbit_s\":{:.0},\"complete\":{}}}",
         &hash[..8],
@@ -429,6 +435,27 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool) -> R
         stats.mbits(),
         after.is_complete()
     );
+    Ok(())
+}
+
+/// Write a verified blob out as an ordinary file.
+async fn save_blob(blobs: &iroh_blobs::store::fs::FsStore, h: iroh_blobs::Hash, out: &Path) -> Result<()> {
+    let out = std::path::absolute(out)?;
+    if let Some(d) = out.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    blobs.blobs().export(h, &out).await?;
+    eprintln!("[media] saved to {}", out.display());
+    Ok(())
+}
+
+/// Offer any file to the team as media (lab): prints its BLAKE3 hash.
+async fn add_media(dir: &Path, file: &Path) -> Result<()> {
+    let peer = Peer::open(dir)?;
+    let blobs = peer.blobs().await?;
+    let tag = blobs.blobs().add_path(std::path::absolute(file)?).await?;
+    println!("{{\"event\":\"add-media\",\"hash\":\"{}\",\"bytes\":{}}}", tag.hash.to_hex(), std::fs::metadata(file)?.len());
+    blobs.shutdown().await?;
     Ok(())
 }
 
@@ -609,8 +636,9 @@ async fn main() -> Result<()> {
             if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
                 bail!("--hash must be 64 hex characters, got {h:?}");
             }
-            fetch_media(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &h, relay_only).await
+            fetch_media(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &h, relay_only, arg(&args, "--out").map(PathBuf::from)).await
         }
+        "add-media" => add_media(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "edit" => edit(
             &need_dir()?,
             &arg(&args, "--key").context("--key")?,
