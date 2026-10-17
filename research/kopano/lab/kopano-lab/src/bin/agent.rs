@@ -119,6 +119,17 @@ impl State {
                 "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
                 "agent": env!("CARGO_PKG_VERSION"),
             })),
+            "say" => {
+                // A short message from the test owner, shown in the window.
+                let text: String = req.get("text").and_then(Value::as_str).unwrap_or("").chars().filter(|c| !c.is_control()).take(300).collect();
+                println!();
+                println!("  ==================================================");
+                println!("  Message from the test owner's PC:");
+                println!("  {text}");
+                println!("  ==================================================");
+                println!();
+                Ok(json!({"shown": text}))
+            }
             "serve-addr" => {
                 let _g = self.busy.lock().await; // wait for a restart in progress
                 Ok(json!({"addr": std::fs::read_to_string(self.dir.join("addr.json")).unwrap_or_default()}))
