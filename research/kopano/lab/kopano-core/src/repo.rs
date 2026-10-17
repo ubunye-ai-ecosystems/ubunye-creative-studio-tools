@@ -165,15 +165,31 @@ impl<'a> Repo<'a> {
 /// sync transport moves; returns (objects, bytes) copied. Media blobs are NOT included: items
 /// only reference them by hash, and media moves separately, on demand.
 pub fn copy_version_closure(from: &dyn ObjectStore, to: &dyn ObjectStore, head: &Id) -> Result<(u64, u64)> {
+    // Invariant: a version object is stored only after everything it needs (its parents' closures
+    // and its own tree). A copy cut off part way then never leaves a version that looks present
+    // but cannot be read, which would make every later copy skip it (found by E17: 53 of 100 runs stuck).
     let (mut n, mut bytes) = (0u64, 0u64);
-    let mut stack = vec![*head];
-    while let Some(v) = stack.pop() {
-        if to.has(&v) {
+    let mut order = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = vec![(*head, false)];
+    while let Some((v, expanded)) = stack.pop() {
+        if expanded {
+            order.push(v);
             continue;
         }
+        if to.has(&v) || !seen.insert(v) {
+            continue;
+        }
+        stack.push((v, true));
+        for p in project::load_version(from, &v)?.parents()? {
+            stack.push((p, false));
+        }
+    }
+    for v in order {
         let ver = project::load_version(from, &v)?;
         let mut ids = Vec::new();
         tree::reachable(from, ver.tree()?, &mut ids)?;
+        ids.push(v);
         for id in ids {
             if !to.has(&id) {
                 let b = from.get(&id)?;
@@ -182,11 +198,6 @@ pub fn copy_version_closure(from: &dyn ObjectStore, to: &dyn ObjectStore, head: 
                 bytes += b.len() as u64;
             }
         }
-        stack.extend(ver.parents()?);
-        let vb = from.get(&v)?;
-        to.put_verified(&v, &vb)?;
-        n += 1;
-        bytes += vb.len() as u64;
     }
     Ok((n, bytes))
 }

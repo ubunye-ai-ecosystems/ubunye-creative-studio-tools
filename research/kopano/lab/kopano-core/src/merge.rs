@@ -76,7 +76,8 @@ pub fn merge_trees(store: &dyn ObjectStore, base: Option<Id>, mine: Option<Id>, 
                     ti_item.assets.clone()
                 } else {
                     fields.push("Media".into());
-                    mi_item.assets.clone()
+                    let (ma, ta) = (json!(mi_item.assets), json!(ti_item.assets));
+                    if jsonmerge::deterministic_pick(&ma, &ta) == &ma { mi_item.assets.clone() } else { ti_item.assets.clone() }
                 };
                 let merged = Item { state, assets, ..mi_item.clone() };
                 let merged_id = merged.put(store)?;
@@ -90,6 +91,22 @@ pub fn merge_trees(store: &dyn ObjectStore, base: Option<Id>, mine: Option<Id>, 
                 clash_fields = fields;
             }
         }
+        // Whole-item clash (cannot merge setting by setting, or deleted on one side and edited on
+        // the other): the same outcome on every device. Keeping data beats deleting it; otherwise
+        // the larger id wins. Mergeable clashes were already resolved deterministically above.
+        if clash_fields == ["whole item".to_string()] {
+            let keep = match (m, t) {
+                (None, t) => t,
+                (m, None) => m,
+                (Some(a), Some(b)) => Some(if a.hex() >= b.hex() { a } else { b }),
+            };
+            if keep != m {
+                changes.push((key.clone(), keep));
+                changed.push(key.clone());
+            }
+        }
+        // The record names both sides in a fixed order, so every device writes the same record.
+        let (a, b) = if m.map(|i| i.hex()) <= t.map(|i| i.hex()) { (m, t) } else { (t, m) };
         let record = Item {
             kind: "kopano.conflict".into(),
             lane: CONFLICT_LANE.into(),
@@ -97,13 +114,13 @@ pub fn merge_trees(store: &dyn ObjectStore, base: Option<Id>, mine: Option<Id>, 
             state: json!({
                 "key": key,
                 "fields": clash_fields,
-                "mine": m.map(|i| i.hex()),
-                "theirs": t.map(|i| i.hex()),
+                "mine": a.map(|i| i.hex()),
+                "theirs": b.map(|i| i.hex()),
             }),
             assets: vec![],
         };
-        let short = t.map(|i| i.short()).unwrap_or_else(|| "removed".into());
-        changes.push((format!("{CONFLICT_PREFIX}{key}/{short}"), Some(record.put(store)?)));
+        let short = |x: Option<Id>| x.map(|i| i.short()).unwrap_or_else(|| "removed".into());
+        changes.push((format!("{CONFLICT_PREFIX}{key}/{}-{}", short(a), short(b)), Some(record.put(store)?)));
         conflicts.push(Conflict { key, fields: clash_fields, mine: m, theirs: t });
     }
     let root = tree::update(store, mine, changes)?;

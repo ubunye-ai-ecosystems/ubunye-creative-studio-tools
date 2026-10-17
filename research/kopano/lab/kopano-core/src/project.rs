@@ -186,6 +186,11 @@ fn touched_lanes(store: &dyn ObjectStore, parent: Option<Id>, root: Option<Id>) 
 /// lane permission (recomputed from the data, not trusted from the claim), project match.
 /// Requires the version's objects and its first parent to be present.
 pub fn verify_version(store: &dyn ObjectStore, project: &Project, id: &Id) -> Result<Version> {
+    verify_version_by(store, project, id, &|account: &str, lane: &str| project.may_write(account, lane))
+}
+
+/// `verify_version` with the permission rule supplied (v2 uses the live members log).
+pub fn verify_version_by(store: &dyn ObjectStore, project: &Project, id: &Id, may_write: &dyn Fn(&str, &str) -> bool) -> Result<Version> {
     let v = load_version(store, id)?;
     let signer = v.v.verify()?;
     v.cert.check(&project.genesis.providers, v.v.body.time_ms)?;
@@ -221,7 +226,7 @@ pub fn verify_version(store: &dyn ObjectStore, project: &Project, id: &Id) -> Re
         // A new value: the author needs write permission on the lane of what changed.
         for item in [before, after].into_iter().flatten() {
             let lane = Item::get(store, &item)?.lane;
-            if !project.may_write(account, &lane) {
+            if !may_write(account, &lane) {
                 bail!("{} may not change the {lane} lane (version {})", v.cert.body.name, id.short());
             }
         }

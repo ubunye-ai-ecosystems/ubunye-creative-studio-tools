@@ -459,6 +459,7 @@ async fn render(dir: &Path, key: &str, out: &Path) -> Result<()> {
     let ev = d["exposure"].as_f64().unwrap_or(0.0) as f32;
     let contrast = d["contrast"].as_f64().unwrap_or(0.0) as f32;
     let temp = d["temperature"].as_f64().unwrap_or(5500.0) as f32;
+    let sat = d["saturation"].as_f64().unwrap_or(100.0) as f32 / 100.0;
     let hash = &item.assets.first().context("no original")?.hash;
     let blobs = peer.blobs().await?;
     let h: iroh_blobs::Hash = hash.parse()?;
@@ -486,7 +487,26 @@ async fn render(dir: &Path, key: &str, out: &Path) -> Result<()> {
             break;
         }
     }
-    let img = best.context("no embedded JPEG in the original")?.to_rgb8();
+    let mut img = best.context("no embedded JPEG in the original")?.to_rgb8();
+    // the camera's orientation tag (TIFF IFD0, tag 0x0112) so portrait photos stand upright
+    let orient = (|| -> Option<u16> {
+        let le = bytes.get(0..2)? == b"II";
+        let u16_at = |o: usize| bytes.get(o..o + 2).map(|b| if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) });
+        let u32_at = |o: usize| bytes.get(o..o + 4).map(|b| if le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) });
+        let ifd = u32_at(4)? as usize;
+        let n = u16_at(ifd)? as usize;
+        (0..n.min(200)).find_map(|i| {
+            let e = ifd + 2 + i * 12;
+            (u16_at(e)? == 0x0112).then(|| u16_at(e + 8)).flatten()
+        })
+    })()
+    .unwrap_or(1);
+    img = match orient {
+        3 => image::imageops::rotate180(&img),
+        6 => image::imageops::rotate90(&img),
+        8 => image::imageops::rotate270(&img),
+        _ => img,
+    };
     let (w, hgt) = (img.width() as f32, img.height() as f32);
     let k = 1600.0 / w.max(hgt);
     let mut img = image::imageops::resize(&img, (w * k).round() as u32, (hgt * k).round() as u32, image::imageops::FilterType::Triangle);
@@ -495,11 +515,15 @@ async fn render(dir: &Path, key: &str, out: &Path) -> Result<()> {
     let (rk, bk) = ((1.0 + shift).max(0.0), (1.0 - shift).max(0.0));
     let ck = 1.0 + contrast / 100.0;
     for p in img.pixels_mut() {
+        let mut v = [0f32; 3];
         for (c, m) in [(0usize, rk), (1, 1.0), (2, bk)] {
             let lin = (p[c] as f32 / 255.0).powf(2.2) * gain * m;
             let s = lin.clamp(0.0, 1.0).powf(1.0 / 2.2);
-            let s = ((s - 0.5) * ck + 0.5).clamp(0.0, 1.0);
-            p[c] = (s * 255.0).round() as u8;
+            v[c] = ((s - 0.5) * ck + 0.5).clamp(0.0, 1.0);
+        }
+        let luma = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+        for c in 0..3 {
+            p[c] = ((luma + (v[c] - luma) * sat).clamp(0.0, 1.0) * 255.0).round() as u8;
         }
     }
     let out = std::path::absolute(out)?;
@@ -510,7 +534,27 @@ async fn render(dir: &Path, key: &str, out: &Path) -> Result<()> {
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut f, 88).encode_image(&img)?;
     drop(f);
     let fp = blake3::hash(&std::fs::read(&out)?).to_hex().to_string();
-    println!("{{\"event\":\"render\",\"key\":\"{key}\",\"exposure\":{ev},\"contrast\":{contrast},\"temperature\":{temp},\"width\":{},\"height\":{},\"fingerprint\":\"{}\"}}", img.width(), img.height(), &fp[..16]);
+    println!("{{\"event\":\"render\",\"key\":\"{key}\",\"exposure\":{ev},\"contrast\":{contrast},\"temperature\":{temp},\"saturation\":{},\"width\":{},\"height\":{},\"fingerprint\":\"{}\"}}", sat * 100.0, img.width(), img.height(), &fp[..16]);
+    Ok(())
+}
+
+/// Add a new photo to the project: the original goes into this device's media store, the photo
+/// (default settings, referencing the original by hash) into the app, saved as a new version.
+async fn import(dir: &Path, file: &Path) -> Result<()> {
+    let peer = Peer::open(dir)?;
+    let blobs = peer.blobs().await?;
+    let tag = blobs.blobs().add_path(std::path::absolute(file)?).await?;
+    blobs.shutdown().await?;
+    let key = file.file_name().and_then(|s| s.to_str()).context("file name")?.to_string();
+    let size = std::fs::metadata(file)?.len();
+    let mut app = peer.app()?;
+    let fresh = ToyEditor::new(&[(key.clone(), tag.hash.to_hex().to_string(), size)]);
+    app.photos.extend(fresh.photos);
+    let mut repo = peer.repo()?;
+    let v = repo.save(&mut app, &format!("Imported {key}"))?;
+    peer.save_app(&app)?;
+    peer.set_head(repo.head)?;
+    println!("{{\"event\":\"import\",\"key\":\"{key}\",\"hash\":\"{}\",\"bytes\":{size},\"version\":\"{}\"}}", tag.hash.to_hex(), v.map(|v| v.short()).unwrap_or_default());
     Ok(())
 }
 
@@ -620,7 +664,15 @@ fn edit(dir: &Path, key: &str, field: &str, value: f64, message: &str) -> Result
     let mut app = peer.app()?;
     let item = app.photos.get_mut(key).with_context(|| format!("no item {key}"))?;
     let ptr = format!("/{}", field.replace('.', "/"));
-    *item.state.pointer_mut(&ptr).with_context(|| format!("no setting {field}"))? = serde_json::json!(value);
+    match item.state.pointer_mut(&ptr) {
+        Some(v) => *v = serde_json::json!(value),
+        None => {
+            // a setting this photo does not have yet (e.g. saturation): add it to its group
+            let (parent, name) = ptr.rsplit_once('/').with_context(|| format!("no setting {field}"))?;
+            let obj = if parent.is_empty() { Some(&mut item.state) } else { item.state.pointer_mut(parent) };
+            obj.and_then(|o| o.as_object_mut()).with_context(|| format!("no setting {field}"))?.insert(name.to_string(), serde_json::json!(value));
+        }
+    }
     let mut repo = peer.repo()?;
     let t = Instant::now();
     let v = repo.save(&mut app, message)?;
@@ -704,6 +756,7 @@ async fn main() -> Result<()> {
             fetch_media(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &h, relay_only, arg(&args, "--out").map(PathBuf::from)).await
         }
         "render" => render(&need_dir()?, &arg(&args, "--key").context("--key")?, Path::new(&arg(&args, "--out").context("--out")?)).await,
+        "import" => import(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "add-media" => add_media(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "edit" => edit(
             &need_dir()?,

@@ -76,11 +76,26 @@ pub fn describe(old: Option<&Value>, new: &Value) -> Vec<String> {
 /// Three-way merge of one photo's state. Returns the merged state and the settings that clashed.
 pub fn merge3(base: Option<&Value>, mine: &Value, theirs: &Value) -> (Value, Vec<String>) {
     let mut clashes = Vec::new();
-    let merged = merge_value(base, mine, theirs, "", &mut clashes);
+    let merged = merge_value(base, mine, theirs, "", &mut clashes, Prefer::Neither);
     (merged, clashes)
 }
 
-fn merge_value(base: Option<&Value>, mine: &Value, theirs: &Value, path: &str, clashes: &mut Vec<String>) -> Value {
+/// Like `merge3`, but where both changed the same setting a person decided which side wins
+/// (an approver accepting work into main).
+pub fn merge3_prefer(base: Option<&Value>, mine: &Value, theirs: &Value, prefer_theirs: bool) -> (Value, Vec<String>) {
+    let mut clashes = Vec::new();
+    let merged = merge_value(base, mine, theirs, "", &mut clashes, if prefer_theirs { Prefer::Theirs } else { Prefer::Mine });
+    (merged, clashes)
+}
+
+#[derive(Clone, Copy)]
+enum Prefer {
+    Neither,
+    Mine,
+    Theirs,
+}
+
+fn merge_value(base: Option<&Value>, mine: &Value, theirs: &Value, path: &str, clashes: &mut Vec<String>, prefer: Prefer) -> Value {
     if mine == theirs || base == Some(theirs) {
         return mine.clone();
     }
@@ -96,7 +111,7 @@ fn merge_value(base: Option<&Value>, mine: &Value, theirs: &Value, path: &str, c
             let bv = b.and_then(|b| b.get(k));
             match (m.get(k), t.get(k)) {
                 (Some(mv), Some(tv)) => {
-                    out.insert(k.clone(), merge_value(bv, mv, tv, &p, clashes));
+                    out.insert(k.clone(), merge_value(bv, mv, tv, &p, clashes, prefer));
                 }
                 (Some(mv), None) => {
                     // They removed it (back to default) and I did not touch it: take the removal.
@@ -115,7 +130,20 @@ fn merge_value(base: Option<&Value>, mine: &Value, theirs: &Value, path: &str, c
         return Value::Object(out);
     }
     clashes.push(label(path));
-    mine.clone()
+    // Both changed it differently. The kept value must not depend on who merges, or two people
+    // merging at once disagree and keep clashing: take the larger value in canonical JSON order.
+    // The other value is never lost: it stays in the clash record for a person to pick.
+    match prefer {
+        Prefer::Mine => mine.clone(),
+        Prefer::Theirs => theirs.clone(),
+        Prefer::Neither => deterministic_pick(mine, theirs).clone(),
+    }
+}
+
+/// The same choice on every device, whichever side is "mine".
+pub fn deterministic_pick<'a>(a: &'a Value, b: &'a Value) -> &'a Value {
+    let (sa, sb) = (serde_json::to_string(a).unwrap_or_default(), serde_json::to_string(b).unwrap_or_default());
+    if sa >= sb { a } else { b }
 }
 
 #[cfg(test)]
@@ -134,11 +162,13 @@ mod tests {
     }
 
     #[test]
-    fn same_slider_clash_keeps_mine_and_reports() {
+    fn same_slider_clash_is_the_same_whoever_merges_and_reports() {
         let base = json!({"rating": 0});
-        let (m, c) = merge3(Some(&base), &json!({"rating": 3}), &json!({"rating": 5}));
-        assert_eq!(m, json!({"rating": 3}));
-        assert_eq!(c, vec!["Rating".to_string()]);
+        let (m1, c1) = merge3(Some(&base), &json!({"rating": 3}), &json!({"rating": 5}));
+        let (m2, c2) = merge3(Some(&base), &json!({"rating": 5}), &json!({"rating": 3}));
+        assert_eq!(m1, m2);
+        assert_eq!(c1, vec!["Rating".to_string()]);
+        assert_eq!(c1, c2);
     }
 
     #[test]
