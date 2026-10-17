@@ -1,0 +1,47 @@
+name: kopano-lab-mac
+
+# Builds the Kopano lab test programs (peer + agent) for macOS, Apple silicon and Intel in one
+# universal binary, for the E15 remote-device test. Research branch only.
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/kopano-architecture]
+    paths:
+      - research/kopano/lab/**
+      - .github/workflows/kopano-lab-mac.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
+          rustup default 1.97.0
+      - name: Build
+        working-directory: research/kopano/lab
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release -p kopano-lab --bin peer --bin agent --target $t
+          done
+      - name: Universal binaries
+        working-directory: research/kopano/lab
+        run: |
+          mkdir -p out
+          for b in peer agent; do
+            lipo -create -output out/$b target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b
+            strip -x out/$b
+            codesign --force --sign - out/$b
+          done
+          file out/*
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kopano-lab-macos-universal
+          path: research/kopano/lab/out/
+          retention-days: 7

@@ -245,6 +245,7 @@ fn media_gate(allowed: HashSet<[u8; 32]>) -> iroh_blobs::provider::events::Event
 }
 
 async fn serve(dir: &Path, relay_only: bool) -> Result<()> {
+    let dir = &std::path::absolute(dir)?;
     let peer = Arc::new(Peer::open(dir)?);
     let blobs = peer.blobs().await?;
     // Devices allowed to fetch media: the lab knows them from the setup folder's certificates.
@@ -603,7 +604,13 @@ async fn main() -> Result<()> {
         .await,
         "serve" => serve(&need_dir()?, relay_only).await,
         "pull" => pull(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), relay_only, args.iter().any(|a| a == "--closure")).await,
-        "fetch-media" => fetch_media(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &arg(&args, "--hash").context("--hash")?, relay_only).await,
+        "fetch-media" => {
+            let h = arg(&args, "--hash").context("--hash")?;
+            if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+                bail!("--hash must be 64 hex characters, got {h:?}");
+            }
+            fetch_media(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &h, relay_only).await
+        }
         "edit" => edit(
             &need_dir()?,
             &arg(&args, "--key").context("--key")?,
