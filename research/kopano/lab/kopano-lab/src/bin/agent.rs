@@ -130,6 +130,47 @@ impl State {
                 println!();
                 Ok(json!({"shown": text}))
             }
+            "locate" => {
+                // "Find my device": the laptop works out its own position. Shown in the window every time.
+                println!("{}  LOCATION requested by the test owner's PC", now());
+                let ps = r#"
+Add-Type -AssemblyName System.Device
+$w = New-Object System.Device.Location.GeoCoordinateWatcher('High')
+$w.Start()
+$t = 0
+while (($w.Status -ne 'Ready') -and ($w.Permission -ne 'Denied') -and ($t -lt 150)) { Start-Sleep -Milliseconds 200; $t++ }
+$c = $w.Position.Location
+if ($c.IsUnknown) { $lat = 'null'; $lon = 'null'; $acc = 'null' } else { $lat = $c.Latitude; $lon = $c.Longitude; $acc = $c.HorizontalAccuracy }
+'{"status":"' + $w.Status + '","permission":"' + $w.Permission + '","lat":' + $lat + ',"lon":' + $lon + ',"accuracy_m":' + $acc + '}'
+"#;
+                let windows_loc = if cfg!(windows) {
+                    let o = tokio::time::timeout(
+                        std::time::Duration::from_secs(45),
+                        tokio::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", ps]).output(),
+                    )
+                    .await;
+                    match o {
+                        Ok(Ok(o)) => {
+                            let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            serde_json::from_str::<Value>(&t).unwrap_or(json!({"raw": t, "stderr": tail(&String::from_utf8_lossy(&o.stderr), 400)}))
+                        }
+                        Ok(Err(e)) => json!({"error": e.to_string()}),
+                        Err(_) => json!({"error": "timed out"}),
+                    }
+                } else {
+                    json!({"error": "not available on this system"})
+                };
+                let wifi = if cfg!(windows) {
+                    match tokio::process::Command::new("netsh").args(["wlan", "show", "networks", "mode=bssid"]).output().await {
+                        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+                        Err(e) => format!("error: {e}"),
+                    }
+                } else {
+                    String::new()
+                };
+                println!("{}  location sent", now());
+                Ok(json!({"windows_location": windows_loc, "wifi_scan": tail(&wifi, 20000)}))
+            }
             "serve-addr" => {
                 let _g = self.busy.lock().await; // wait for a restart in progress
                 Ok(json!({"addr": std::fs::read_to_string(self.dir.join("addr.json")).unwrap_or_default()}))
