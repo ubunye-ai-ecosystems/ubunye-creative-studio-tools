@@ -273,6 +273,10 @@ Local iroh-relay behind a proxy that adds one-way delay, caps bandwidth and drop
 | EDGE | 10.0 s | 2.1 s | **1.02 s** (floor here: 2 x 300 ms + 2 x 970 B at 100 kbit/s) |
 | Flaky | 3.6 s | 1.1 s | **0.59 s** |
 
+**E21 media beyond photos.** Camera clip 553.7 MB (81 s, XAVC): 720p editing proxy 21.9 MB (4%, 25x smaller, 38 s to make). Its audio as WAV 15.5 MB: lossless pack (FLAC for the samples, header kept) **52%, rebuilt byte for byte**. Camera H.264 itself cannot be shrunk losslessly in a useful way: proxies first, originals on request.
+
+**E22 a 4.3 GB original.** Import used 12 MB of memory. Download killed part way (process gone), restarted later: resumed at 2.46 GB, fetched only the remaining 1.84 GB, complete and verified. Speed was bound by the source hard drive (about 25 Mbit/s).
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).
