@@ -25,7 +25,7 @@ Goal: when Kopano is published, it works. Not only on good Wi-Fi, not only for p
 | E34 | 10,000 small files (sound effects, stills) | Per-file cost small; no per-file round trips | **PASS** with collections (new `add-folder` / `fetch-folder`): 2,000 files, 42.5 MB. Direct: one request 11.3 s vs one per file 22.0 s. Far link (4 Mbit/s, 150 ms): **94.7 s vs 1,621.7 s, 17x faster**; one request uses 90% of the link |
 | E35 | Direct connection with real packet loss (Linux netem) | Usable at 10% loss | |
 | E36 | Long run: daemons editing for hours on a bad network | 0 divergence, flat memory | |
-| E38 | Sekhoto past papers on a phone with almost no data: page by page, verified, phone to phone | Bytes per page opened, not per paper; works offline between two devices | |
+| E38 | Sekhoto past papers on a phone with almost no data: page by page, verified, phone to phone | Bytes per page opened, not per paper; works offline between two devices | **PASS after a fix.** Real Grade 11 Maths P1 (2015, 16 pages, 397 KB), split by the publisher into one verified object per page (page list: 1 KB; pages 1 to 191 KB, median 30 KB). No internet (LAN-only): learner A opened 3 pages for **116 KB**; with the publisher gone, learner B got page 3 **from learner A** (81 KB), byte-identical; a page A lacks fails cleanly. **Bug found:** `fetch-media` and `fetch-ranges` exited without closing the media store, so a just-downloaded small file could be lost; fixed |
 | E37 | The three real machines: big file, swarm, LAN-only, live edits | Same as above on real hardware | |
 
 ## Proposed next (not built): Kopano Link

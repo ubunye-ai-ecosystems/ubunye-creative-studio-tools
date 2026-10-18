@@ -637,6 +637,7 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out:
             save_blob(&blobs, h, o).await?;
         }
         println!("{{\"event\":\"media\",\"hash\":\"{}\",\"already_complete\":true,\"bytes_received\":0}}", &hash[..8]);
+        blobs.shutdown().await?;
         return Ok(());
     }
     let (ep, conn, connect_ms, path) = connect(&peer, from, relay_only, iroh_blobs::ALPN).await?;
@@ -645,7 +646,7 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out:
     {
         // in memory only: the store reserves the whole file on its first write, so nothing may
         // be written before the check
-        let (size, _) = iroh_blobs::get::request::get_verified_size(&conn, &h).await?;
+        let (size, _) = iroh_blobs::get::request::get_verified_size(&conn, &h).await.map_err(|e| anyhow!("that teammate does not have this file (yet); try another teammate or the owner ({e})"))?;
         let need = size.saturating_sub(had) + (16 << 20);
         if let Err(e) = reserve(&peer.dir.join("media"), need) {
             conn.close(0u32.into(), b"no space");
@@ -671,6 +672,8 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out:
         stats.mbits(),
         after.is_complete()
     );
+    // E38: close the store, or what was just received may not be kept after the program exits
+    blobs.shutdown().await?;
     Ok(())
 }
 
@@ -733,6 +736,7 @@ async fn fetch_ranges(dir: &Path, from: &Path, hash: &str, ranges: &[(u64, u64)]
         stats.payload_bytes_read,
         stats.total_bytes_read()
     );
+    blobs.shutdown().await?;
     Ok(())
 }
 
