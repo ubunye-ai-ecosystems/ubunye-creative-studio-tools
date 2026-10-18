@@ -152,7 +152,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    fs::write(&tmp, bytes).with_context(|| format!("cannot write {}", tmp.display()))?;
+    {
+        // E27: flush the bytes to the disk before the rename, so a power cut cannot leave the
+        // new name pointing at an empty file.
+        use std::io::Write;
+        let mut f = fs::File::create(&tmp).with_context(|| format!("cannot write {}", tmp.display()))?;
+        f.write_all(bytes).with_context(|| format!("cannot write {}", tmp.display()))?;
+        f.sync_all().with_context(|| format!("cannot write {}", tmp.display()))?;
+    }
     fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(())
 }

@@ -32,7 +32,7 @@ This is the security pass done before the protocol goes public. Method: name eve
 | 17 | Thief with the laptop itself | Act as the device | Owner blocks that device (signed `BlockDevice`); the person gets a new device certificate from the identity provider and keeps their account | sim_workflow (blocked devices' work rejected) | Tested |
 | 18 | Supply chain | A known-vulnerable or wrongly licensed dependency | `cargo audit` and `cargo deny` with `lab/deny.toml` | 464 crates: **0 vulnerabilities**, licences all compatible with MIT OR Apache-2.0; 3 crates flagged unmaintained (not vulnerable, all via iroh) | Tested; add to CI before release |
 
-The whole v2 simulator was rerun after these fixes, including smarter cheats that backdate and lie about sequence numbers (see `results/e26-security.md`).
+The whole v2 simulator was rerun after these fixes, including smarter cheats that backdate and lie about sequence numbers: **500 of 500 teams passed** (500 seeds x 300 steps, 38,285 edits, 10,078 cheat attempts, 5,092 cut transfers; `results/e26-security.md`).
 
 ## What the fixes cost honest users
 

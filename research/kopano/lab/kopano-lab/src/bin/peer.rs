@@ -626,6 +626,19 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out:
         return Ok(());
     }
     let (ep, conn, connect_ms, path) = connect(&peer, from, relay_only, iroh_blobs::ALPN).await?;
+    // E28: learn the size first (the last chunk proves it), and make sure the rest fits on this
+    // disk before starting, instead of failing part way with an obscure error.
+    {
+        // in memory only: the store reserves the whole file on its first write, so nothing may
+        // be written before the check
+        let (size, _) = iroh_blobs::get::request::get_verified_size(&conn, &h).await?;
+        let need = size.saturating_sub(had) + (16 << 20);
+        if let Err(e) = reserve(&peer.dir.join("media"), need) {
+            conn.close(0u32.into(), b"no space");
+            ep.close().await;
+            bail!("not enough disk space: this original needs {} MB more ({e}). Free some space and run it again; nothing already received is lost.", need / 1_000_000);
+        }
+    }
     let t = Instant::now();
     let stats = blobs.remote().fetch(conn.clone(), h).complete().await?;
     let ms = t.elapsed().as_millis();
@@ -645,6 +658,70 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out:
         after.is_complete()
     );
     Ok(())
+}
+
+/// E30: fetch only some byte ranges of a remote original (what a timeline needs), each 1 KiB chunk
+/// verified against the original's BLAKE3 root by iroh-blobs (bao), and write them into a sparse
+/// file the size of the original. What was already fetched is not fetched again.
+async fn fetch_ranges(dir: &Path, from: &Path, hash: &str, ranges: &[(u64, u64)], out: &Path, relay_only: bool) -> Result<()> {
+    use iroh_blobs::protocol::{ChunkRanges, ChunkRangesExt, GetRequest};
+    let peer = Peer::open(dir)?;
+    let blobs = peer.blobs().await?;
+    let h: iroh_blobs::Hash = hash.parse()?;
+    let mut want = ChunkRanges::last_chunk(); // the size, proven by the last chunk
+    for (a, b) in ranges {
+        want |= ChunkRanges::bytes(*a..*b);
+    }
+    let (ep, conn, connect_ms, path) = connect(&peer, from, relay_only, iroh_blobs::ALPN).await?;
+    let t = Instant::now();
+    let stats = blobs.remote().execute_get(conn.clone(), GetRequest::blob_ranges(h, want)).complete().await?;
+    let ms = t.elapsed().as_millis();
+    conn.close(0u32.into(), b"done");
+    ep.close().await;
+    // write what we hold for the asked ranges into a sparse copy
+    let out = std::path::absolute(out)?;
+    let f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&out)?;
+    let mut size = 0u64;
+    let mut written = 0u64;
+    for (a, b) in ranges {
+        let mut s = blobs.blobs().export_ranges(h, *a..*b).stream();
+        use futures_lite::StreamExt;
+        while let Some(item) = s.next().await {
+            match item {
+                iroh_blobs::api::proto::ExportRangesItem::Size(n) => {
+                    size = n;
+                    if f.metadata()?.len() != n {
+                        f.set_len(n)?;
+                    }
+                }
+                iroh_blobs::api::proto::ExportRangesItem::Data(leaf) => {
+                    use std::os::windows::fs::FileExt;
+                    f.seek_write(&leaf.data, leaf.offset)?;
+                    written += leaf.data.len() as u64;
+                }
+                iroh_blobs::api::proto::ExportRangesItem::Error(e) => bail!("export: {e}"),
+            }
+        }
+    }
+    println!(
+        "{{\"event\":\"ranges\",\"hash\":\"{}\",\"path\":{:?},\"connect_ms\":{connect_ms},\"file_size\":{size},\"asked_bytes\":{},\"bytes_received\":{},\"total_read\":{},\"written\":{written},\"ms\":{ms}}}",
+        &hash[..8],
+        path,
+        ranges.iter().map(|(a, b)| b - a).sum::<u64>(),
+        stats.payload_bytes_read,
+        stats.total_bytes_read()
+    );
+    Ok(())
+}
+
+/// Check that `bytes` fit on the disk holding `dir` by briefly reserving them (Windows allocates
+/// on set_len; elsewhere the OS may create a sparse file, so this only catches some cases).
+fn reserve(dir: &Path, bytes: u64) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let p = dir.join(".space-check");
+    let r = std::fs::File::create(&p).and_then(|f| f.set_len(bytes));
+    let _ = std::fs::remove_file(&p);
+    r.map_err(|e| anyhow!("{e}"))
 }
 
 /// Write a verified blob out as an ordinary file.
@@ -768,6 +845,112 @@ async fn import(dir: &Path, file: &Path) -> Result<()> {
 }
 
 /// Offer any file to the team as media (lab): prints its BLAKE3 hash.
+// ---- E32: bundles, for when there is no network at all (USB stick, SD card, a phone carried) --
+//
+// File: "KOPANO-BUNDLE-1\n", one JSON header line, the compact payload (as on the wire), then
+// for each original: 8-byte length, 32-byte BLAKE3 hash, the bytes. On import every object is
+// stored under its own hash, every version is verified like a network pull, and every original is
+// re-hashed; a damaged or forged bundle changes nothing.
+
+const BUNDLE_MAGIC: &[u8] = b"KOPANO-BUNDLE-1\n";
+
+async fn export_bundle(dir: &Path, have: Option<String>, media: &[String], out: &Path) -> Result<()> {
+    use std::io::Write;
+    let peer = Peer::open(dir)?;
+    let have: Vec<Id> = have.iter().filter_map(|h| Id::parse(h.trim()).ok()).filter(|h| peer.store.has(h)).collect();
+    let (records, raw, z) = compact_payload(&peer, &have)?;
+    let head = peer.head().context("nothing to export")?;
+    let hdr = serde_json::json!({"project": peer.project.id.hex(), "head": head.hex(), "from": peer.cert.body.name, "records": records, "raw": raw, "compressed": z.len(), "media": media.len()});
+    let mut f = std::io::BufWriter::new(std::fs::File::create(out)?);
+    f.write_all(BUNDLE_MAGIC)?;
+    f.write_all(format!("{hdr}\n").as_bytes())?;
+    f.write_all(&z)?;
+    let blobs = peer.blobs().await?;
+    let mut media_bytes = 0u64;
+    for m in media {
+        let h: iroh_blobs::Hash = m.parse()?;
+        let tmp = std::path::absolute(dir.join(format!(".bundle-{}", &m[..8])))?;
+        blobs.blobs().export(h, &tmp).await?;
+        let len = std::fs::metadata(&tmp)?.len();
+        f.write_all(&len.to_le_bytes())?;
+        f.write_all(h.as_bytes())?;
+        std::io::copy(&mut std::fs::File::open(&tmp)?, &mut f)?;
+        std::fs::remove_file(&tmp)?;
+        media_bytes += len;
+    }
+    f.flush()?;
+    f.into_inner()?.sync_all()?;
+    blobs.shutdown().await?;
+    println!("{}", serde_json::json!({"event": "bundle-out", "head": head.short(), "records": records, "compressed": z.len(), "media": media.len(), "media_bytes": media_bytes, "file_bytes": std::fs::metadata(out)?.len()}));
+    Ok(())
+}
+
+async fn import_bundle(dir: &Path, file: &Path) -> Result<()> {
+    use std::io::{BufRead, Read};
+    let peer = Peer::open(dir)?;
+    let t = Instant::now();
+    let mut f = std::io::BufReader::new(std::fs::File::open(file)?);
+    let mut magic = vec![0u8; BUNDLE_MAGIC.len()];
+    f.read_exact(&mut magic)?;
+    if magic != BUNDLE_MAGIC {
+        bail!("not a Kopano bundle");
+    }
+    let mut line = String::new();
+    f.by_ref().take(64 * 1024).read_line(&mut line)?;
+    let hdr: serde_json::Value = serde_json::from_str(&line).context("bad bundle header")?;
+    if hdr["project"].as_str() != Some(&peer.project.id.hex()) {
+        bail!("this bundle is for another project");
+    }
+    let zlen = hdr["compressed"].as_u64().context("header")?;
+    if zlen > MAX_FRAME as u64 {
+        bail!("bundle payload too large");
+    }
+    let mut z = vec![0u8; zlen as usize];
+    f.read_exact(&mut z)?;
+    const DAMAGED: &str = "this bundle is damaged or was changed after it was made; nothing was imported. Copy it again from the sender";
+    let d = kopano_core::wire::decode_compact(&peer.store, &z, hdr["raw"].as_u64().unwrap_or(0)).map_err(|_| anyhow!(DAMAGED))?;
+    for v in &d.versions {
+        project::verify_version(&peer.store, &peer.project, v).map_err(|_| anyhow!(DAMAGED))?;
+    }
+    let head = Id::parse(hdr["head"].as_str().context("header")?)?;
+    let mut app = peer.app()?;
+    let mut repo = peer.repo()?;
+    let result = match repo.integrate(&mut app, &head)? {
+        Integrated::AlreadyHad => "already up to date".to_string(),
+        Integrated::FastForward { applied } => format!("fast-forward, {applied} item(s) applied"),
+        Integrated::Merged { applied, conflicts, .. } => format!("merged, {applied} item(s) applied, {} clash(es)", conflicts.len()),
+    };
+    peer.save_app(&app)?;
+    peer.set_head(repo.head)?;
+    peer.store.flush()?;
+    // originals: each re-hashed before it is kept
+    let blobs = peer.blobs().await?;
+    let (mut ok, mut bad) = (0u32, 0u32);
+    for _ in 0..hdr["media"].as_u64().unwrap_or(0) {
+        let mut len = [0u8; 8];
+        let mut want = [0u8; 32];
+        f.read_exact(&mut len)?;
+        f.read_exact(&mut want)?;
+        let len = u64::from_le_bytes(len);
+        let tmp = std::path::absolute(dir.join(".bundle-in"))?;
+        let copied = std::io::copy(&mut f.by_ref().take(len), &mut std::fs::File::create(&tmp)?)?;
+        if copied != len {
+            let _ = std::fs::remove_file(&tmp);
+            bail!("bundle is cut short");
+        }
+        let tag = blobs.blobs().add_path(&tmp).await?;
+        std::fs::remove_file(&tmp)?;
+        if tag.hash.as_bytes() == &want {
+            ok += 1;
+        } else {
+            bad += 1; // stored under its true hash, which nothing refers to; never used as the original
+        }
+    }
+    blobs.shutdown().await?;
+    println!("{}", serde_json::json!({"event": "bundle-in", "objects": d.objects, "versions": d.versions.len(), "result": result, "media_ok": ok, "media_rejected": bad, "ms": t.elapsed().as_millis()}));
+    Ok(())
+}
+
 async fn add_media(dir: &Path, file: &Path) -> Result<()> {
     let peer = Peer::open(dir)?;
     let blobs = peer.blobs().await?;
@@ -996,8 +1179,21 @@ async fn daemon(dir: &Path, port: u16, follow_from: Option<PathBuf>, relay_only:
     if let Some(f) = follow_from {
         let (p, e) = (peer.clone(), router.endpoint().clone());
         tokio::spawn(async move {
-            if let Err(err) = follow(p, e, f).await {
-                eprintln!("[daemon] follow stopped: {err:#}");
+            // E29: a closed lid, a lost signal or a sleeping teammate ends the connection. Keep
+            // trying, waiting 1, 2, 4 ... 30 s between tries; each new watch says what we already
+            // have, so everything missed arrives as one compact push.
+            let mut wait = 1u64;
+            loop {
+                let started = Instant::now();
+                match follow(p.clone(), e.clone(), f.clone()).await {
+                    Ok(()) => eprintln!("[daemon] follow ended"),
+                    Err(err) => eprintln!("[daemon] follow interrupted: {err:#}; retrying in {wait} s"),
+                }
+                if started.elapsed().as_secs() > 60 {
+                    wait = 1; // it had been working: start the backoff again
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                wait = (wait * 2).min(30);
             }
         });
     }
@@ -1062,6 +1258,13 @@ async fn main() -> Result<()> {
         .await,
         "serve" => serve(&need_dir()?, relay_only).await,
         "pull" => pull(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), relay_only, args.iter().any(|a| a == "--closure"), args.iter().any(|a| a == "--compact")).await,
+        "fetch-ranges" => {
+            let ranges: Vec<(u64, u64)> = arg(&args, "--ranges").context("--ranges a-b,c-d")?.split(',').map(|r| {
+                let (a, b) = r.split_once('-').context("range a-b")?;
+                Ok((a.parse()?, b.parse()?))
+            }).collect::<Result<_>>()?;
+            fetch_ranges(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &arg(&args, "--hash").context("--hash")?, &ranges, Path::new(&arg(&args, "--out").context("--out")?), relay_only).await
+        }
         "fetch-media" => {
             let h = arg(&args, "--hash").context("--hash")?;
             if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1072,6 +1275,8 @@ async fn main() -> Result<()> {
         "render" => render(&need_dir()?, &arg(&args, "--key").context("--key")?, Path::new(&arg(&args, "--out").context("--out")?)).await,
         "import" => import(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "daemon" => daemon(&need_dir()?, arg(&args, "--port").context("--port")?.parse()?, arg(&args, "--follow").map(PathBuf::from), relay_only).await,
+        "export-bundle" => export_bundle(&need_dir()?, arg(&args, "--have"), &args_after(&args, "--media"), Path::new(&arg(&args, "--out").context("--out")?)).await,
+        "import-bundle" => import_bundle(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "add-media" => add_media(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "edit" => edit(
             &need_dir()?,

@@ -29,3 +29,5 @@ cargo deny check licenses advisories: advisories ok, licenses ok (Unlicense allo
 
 ## Workflow simulator after the fixes (owner seals main after every members change; cheats also backdate and lie about seq)
 200 seeds x 150 ops: passed 200, failures {}, Stats { edits: 6801, approvals: 1366, clash_decisions: 1069, catch_ups: 1490, syncs: 19529, cut_syncs: 1000, member_changes: 661, cheats: 1969, forks_reoffered: 43 }
+
+500 seeds x 300 ops (3653 s): passed 500, failures {}, Stats { edits: 38285, approvals: 6367, clash_decisions: 7320, catch_ups: 6362, syncs: 64388, cut_syncs: 5092, member_changes: 3438, cheats: 10078, forks_reoffered: 634 }

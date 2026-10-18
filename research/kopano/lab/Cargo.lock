@@ -1892,6 +1892,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "fastcdc",
+ "futures-lite",
  "hex",
  "image",
  "iroh",
