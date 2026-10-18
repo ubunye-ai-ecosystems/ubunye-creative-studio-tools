@@ -30,7 +30,7 @@ use kopano_core::repo::{Integrated, Repo};
 use kopano_core::store::{Id, ObjectStore, RedbStore};
 use kopano_core::tree;
 use kopano_lab::ToyEditor;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -149,6 +149,8 @@ struct SyncHandler {
     peer: Arc<Peer>,
     /// E20: new heads announced to watchers (the daemon pushes; plain `serve` never sends)
     heads: tokio::sync::broadcast::Sender<Id>,
+    /// E24: one pushed payload per (what the watcher had, new head), shared by every watcher
+    pushed: Arc<std::sync::Mutex<HashMap<(Vec<Id>, Id), Arc<(u64, usize, Vec<u8>)>>>>,
 }
 impl std::fmt::Debug for SyncHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -196,9 +198,22 @@ impl SyncHandler {
                     loop {
                         if let Some(h) = next {
                             if !known.contains(&h) {
-                                let (records, raw, z) = compact_payload(&self.peer, &known)?;
+                                let cached = self.pushed.lock().unwrap().get(&(known.clone(), h)).cloned();
+                                let built = match cached {
+                                    Some(b) => b,
+                                    None => {
+                                        let b = Arc::new(compact_payload(&self.peer, &known)?);
+                                        let mut c = self.pushed.lock().unwrap();
+                                        if c.len() > 256 {
+                                            c.clear();
+                                        }
+                                        c.insert((known.clone(), h), b.clone());
+                                        b
+                                    }
+                                };
+                                let (records, raw, z) = (built.0, built.1, &built.2);
                                 write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"head": h.hex(), "ms": now_ms(), "records": records, "raw": raw}))?).await?;
-                                write_frame(&mut send, &z).await?;
+                                write_frame(&mut send, z).await?;
                                 known = vec![h];
                             }
                         }
@@ -351,7 +366,7 @@ async fn serve(dir: &Path, relay_only: bool) -> Result<()> {
     }
     let ep = peer.endpoint(relay_only, vec![SYNC_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]).await?;
     let blobs_proto = iroh_blobs::BlobsProtocol::new(&blobs, Some(media_gate(allowed)));
-    let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: tokio::sync::broadcast::channel(64).0 }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
+    let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: tokio::sync::broadcast::channel(64).0, pushed: Default::default() }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
     let t = Instant::now();
     router.endpoint().online().await;
     let addr = router.endpoint().addr();
@@ -948,7 +963,7 @@ async fn daemon(dir: &Path, port: u16, follow_from: Option<PathBuf>, relay_only:
     let heads = tokio::sync::broadcast::channel::<Id>(64).0;
     let ep = peer.endpoint(relay_only, vec![SYNC_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]).await?;
     let blobs_proto = iroh_blobs::BlobsProtocol::new(&blobs, None);
-    let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: heads.clone() }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
+    let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: heads.clone(), pushed: Default::default() }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
     router.endpoint().online().await;
     std::fs::write(dir.join("addr.json"), serde_json::to_vec(&router.endpoint().addr())?)?;
     if let Some(f) = follow_from {

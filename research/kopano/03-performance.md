@@ -286,6 +286,16 @@ Local iroh-relay behind a proxy that adds one-way delay, caps bandwidth and drop
 | 300,000 | 4.5 s | 3.3 s | **0.6 ms** |
 | 1,000,000 | 18.1 s | 13.8 s | **1.45 ms** |
 
+**E24 one owner, many teammates** (`scenarios/e24_fanout_push.py`, all daemons on one machine, direct links): the owner's daemon pushes each edit to every follower.
+
+| Teammates | All joined | Edits that reached all | Median | Slowest | Follower's own apply (median) |
+|---|---|---|---|---|---|
+| 10 | 5.7 s | 5 of 5 | 0.16 to 0.48 s | 0.63 s | 0.21 s |
+| 25 | 7.3 s | 5 of 5 | 0.57 to 1.39 s | 1.71 s | 0.70 s |
+| 50 | 8.9 s | 5 of 5 | 1.4 to 3.2 s | 3.5 s | 2.5 s |
+
+Every edit reached every teammate (each push about 1 KB). The owner now builds each push once and shares it with all followers (first run, without that: 25 teammates slowest 2.5 s). What is left is the followers' own apply step, slow here only because 50 daemons share one CPU and one hard drive; on separate devices each applies in parallel. Not measured: 50 real devices.
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).
