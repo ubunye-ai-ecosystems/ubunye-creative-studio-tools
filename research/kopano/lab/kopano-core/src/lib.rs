@@ -13,4 +13,5 @@ pub mod project;
 pub mod repo;
 pub mod store;
 pub mod tree;
+pub mod wire;
 pub mod workflow;

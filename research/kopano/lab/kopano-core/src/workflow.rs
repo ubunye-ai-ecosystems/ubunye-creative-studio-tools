@@ -16,12 +16,15 @@
 //! - `branch/<account>`: only that account's devices, while the account is a current member and
 //!   the device is not blocked.
 //! - `main`: only an approver according to the members the update cites (so later demotions do
-//!   not invalidate earlier approvals). Known limit: an approver who was demoted but never saw the
-//!   demotion can still approve until they sync; that is inherent to working offline and is shown
-//!   to the owner as "approved by a former approver" for review.
+//!   not invalidate earlier approvals), replacing the previous main update with seq + 1 and citing
+//!   at least what it cited. The owner seals main after each members change, so a demoted
+//!   approver cannot keep moving main. Remaining window: an honest approver who builds on a
+//!   demoted approver's update before the seal reaches them carries it into main; the app shows
+//!   it as "approved by a former approver" for review.
 //! - Two updates of the same ref replacing the same predecessor (two approvers at once, or one
 //!   person's two devices): the larger (seq, id) is the tip everyone follows; the other version
-//!   stays reachable and is offered for approval again, so nothing is lost.
+//!   stays reachable and is offered for approval again, so nothing is lost. A signer who is no
+//!   longer an approver loses every fork.
 
 use crate::identity::{now_ms, DeviceCert, DeviceKey, Signed};
 use crate::merge::{self, CONFLICT_PREFIX};
@@ -153,8 +156,13 @@ fn load_member_entry(store: &dyn ObjectStore, id: &Id) -> Result<SignedMemberEnt
 /// Members after applying `known` entries (and nothing else) in a deterministic order: an entry
 /// is applied once everything it saw is applied, ties broken by id. Entries signed by someone who
 /// is not an admin at that point, or by a blocked device, are ignored.
+///
+/// Concurrent demotion wins (attack A3): an entry by X is dropped when an applied entry demotes X
+/// (role, removal or device block) without having seen it. Otherwise a demoted admin could sign an
+/// entry that cites only old history, grind its id to sort before the demotion, and add a
+/// sock-puppet admin who survives. Cost: an admin's offline change made while they were being
+/// demoted is dropped; the owner can redo it.
 pub fn members(store: &dyn ObjectStore, project: &Project, known: &BTreeSet<Id>) -> Result<Members> {
-    let mut m = Members::from_genesis(project);
     let mut entries: BTreeMap<Id, SignedMemberEntry> = BTreeMap::new();
     for id in known {
         if let Ok(e) = load_member_entry(store, id) {
@@ -163,7 +171,35 @@ pub fn members(store: &dyn ObjectStore, project: &Project, known: &BTreeSet<Id>)
             }
         }
     }
+    let seen: BTreeMap<Id, BTreeSet<Id>> = entries.iter().map(|(id, e)| (*id, member_closure(store, &e.entry.body.after.iter().filter_map(|a| Id::parse(a).ok()).collect::<Vec<_>>()))).collect();
+    let mut excluded: BTreeSet<Id> = BTreeSet::new();
+    loop {
+        let (m, applied) = apply_entries(project, &entries, &excluded);
+        let bad = applied.iter().find(|e| {
+            let cert = &entries[*e].cert;
+            cert.body.account != m.owner && applied.iter().any(|d| d != *e && demotes(&entries[d].entry.body.op, cert) && !seen[d].contains(*e))
+        });
+        match bad {
+            Some(b) => {
+                excluded.insert(*b);
+            }
+            None => return Ok(m),
+        }
+    }
+}
+
+fn demotes(op: &MemberOp, cert: &DeviceCert) -> bool {
+    match op {
+        MemberOp::Set { account, role, .. } => *account == cert.body.account && *role != Role::Admin,
+        MemberOp::Remove { account } => *account == cert.body.account,
+        MemberOp::BlockDevice { device } => *device == cert.body.device,
+    }
+}
+
+fn apply_entries(project: &Project, entries: &BTreeMap<Id, SignedMemberEntry>, excluded: &BTreeSet<Id>) -> (Members, Vec<Id>) {
+    let mut m = Members::from_genesis(project);
     let mut done: BTreeSet<Id> = BTreeSet::new();
+    let mut applied = vec![];
     loop {
         let ready: Option<Id> = entries
             .iter()
@@ -173,6 +209,9 @@ pub fn members(store: &dyn ObjectStore, project: &Project, known: &BTreeSet<Id>)
             .next();
         let Some(id) = ready else { break };
         done.insert(id);
+        if excluded.contains(&id) {
+            continue;
+        }
         let e = &entries[&id];
         let ok = e.entry.verify().is_ok()
             && e.cert.check(&project.genesis.providers, e.entry.body.time_ms).is_ok()
@@ -181,9 +220,10 @@ pub fn members(store: &dyn ObjectStore, project: &Project, known: &BTreeSet<Id>)
             && !m.blocked.contains(&e.cert.body.device);
         if ok {
             m.apply(&e.entry.body.op);
+            applied.push(id);
         }
     }
-    Ok(m)
+    (m, applied)
 }
 
 /// Every entry reachable from `tips` through `after` (the members a signer had seen).
@@ -284,39 +324,63 @@ pub fn check_ref(store: &dyn ObjectStore, project: &Project, current: &Members, 
 }
 
 /// The tip of every ref among `known` valid updates: an update nobody valid replaced; if several
-/// (a fork), the larger (seq, id). Also returns the forked-off versions so they can be re-offered.
+/// (a fork), the best by (signer still allowed now, seq, id). Also returns the forked-off versions
+/// so they can be re-offered.
+///
+/// Chain rules (attacks A1, A2): an update must replace a valid update of the same ref with
+/// seq = its seq + 1 (or be the first, seq 1), so nobody wins a fork by claiming a huge seq; and a
+/// `main` update must cite at least the members its predecessor cited, so whoever builds on main
+/// inherits what main already knew. The owner seals main after every members change
+/// (`seal_main`), so a demoted approver can no longer build on main with the old members.
 pub fn tips(store: &dyn ObjectStore, project: &Project, current: &Members, known: &BTreeSet<Id>) -> (BTreeMap<String, (Id, RefUpdate)>, Vec<Id>) {
-    let mut valid: BTreeMap<Id, RefUpdate> = BTreeMap::new();
-    for id in known {
-        if let Ok(u) = check_ref(store, project, current, id) {
-            valid.insert(*id, u);
+    let mut cand: Vec<(Id, RefUpdate, DeviceCert)> = known.iter().filter_map(|id| check_ref(store, project, current, id).ok().and_then(|u| load_ref(store, id).ok().map(|s| (*id, u, s.cert)))).collect();
+    cand.sort_by(|a, b| (a.1.seq, a.0).cmp(&(b.1.seq, b.0)));
+    let mut valid: BTreeMap<Id, (RefUpdate, DeviceCert)> = BTreeMap::new();
+    for (id, u, cert) in cand {
+        let ok = match &u.previous {
+            None => u.seq == 1,
+            Some(p) => match Id::parse(p).ok().and_then(|p| valid.get(&p)) {
+                Some((pu, _)) => pu.name == u.name && u.seq == pu.seq + 1 && (u.name != MAIN || cites_at_least(store, &u, pu)),
+                None => false,
+            },
+        };
+        if ok {
+            valid.insert(id, (u, cert));
         }
     }
-    let replaced: BTreeSet<String> = valid.values().filter_map(|u| u.previous.clone()).collect();
+    let replaced: BTreeSet<String> = valid.values().filter_map(|(u, _)| u.previous.clone()).collect();
+    let still = |u: &RefUpdate, c: &DeviceCert| u.name != MAIN || (current.is_approver(&c.body.account) && !current.blocked.contains(&c.body.device));
     let mut out: BTreeMap<String, (Id, RefUpdate)> = BTreeMap::new();
+    let mut best: BTreeMap<String, (bool, u64, String)> = BTreeMap::new();
     let mut forks = vec![];
-    for (id, u) in &valid {
+    for (id, (u, c)) in &valid {
         if replaced.contains(&id.hex()) {
             continue;
         }
-        match out.get(&u.name) {
-            Some((bid, bu)) if (bu.seq, bid.hex()) >= (u.seq, id.hex()) => {
-                if let Ok(v) = Id::parse(&u.version) {
-                    forks.push(v);
-                }
+        let key = (still(u, c), u.seq, id.hex());
+        if let Some(b) = best.get(&u.name) {
+            if *b >= key {
+                forks.extend(Id::parse(&u.version).ok());
+                continue;
             }
-            Some((_, bu)) => {
-                if let Ok(v) = Id::parse(&bu.version) {
-                    forks.push(v);
-                }
-                out.insert(u.name.clone(), (*id, u.clone()));
-            }
-            None => {
-                out.insert(u.name.clone(), (*id, u.clone()));
-            }
+            forks.extend(out.get(&u.name).and_then(|(_, bu)| Id::parse(&bu.version).ok()));
         }
+        best.insert(u.name.clone(), key);
+        out.insert(u.name.clone(), (*id, u.clone()));
     }
     (out, forks)
+}
+
+fn cites_at_least(store: &dyn ObjectStore, u: &RefUpdate, previous: &RefUpdate) -> bool {
+    let ids = |r: &RefUpdate| r.members.iter().filter_map(|m| Id::parse(m).ok()).collect::<Vec<_>>();
+    member_closure(store, &ids(previous)).is_subset(&member_closure(store, &ids(u)))
+}
+
+/// After a members change the owner re-signs main at the same version, citing the new members:
+/// from then on nobody can build on main with the old members (see `tips`).
+pub fn seal_main(store: &dyn ObjectStore, project: &Project, main_tip: (Id, &RefUpdate), members_seen: &[Id], cert: &DeviceCert, key: &DeviceKey) -> Result<Id> {
+    let v = Id::parse(&main_tip.1.version)?;
+    update_ref(store, project, MAIN, &v, Some((main_tip.0, main_tip.1.seq)), members_seen, cert, key)
 }
 
 // ---------------------------------------------------------------- versions under v2 rules

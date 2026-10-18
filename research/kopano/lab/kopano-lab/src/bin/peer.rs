@@ -19,6 +19,8 @@
 //!   corrupt --dir D                                    damage one stored object (recovery test)
 //!   verify  --dir D                                    re-hash every object, list damaged ones
 
+#[path = "../keystore.rs"]
+mod keystore;
 use anyhow::{anyhow, bail, Context, Result};
 use iroh::endpoint::{presets, Connection};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -57,7 +59,7 @@ struct Peer {
 impl Peer {
     fn open(dir: &Path) -> Result<Self> {
         let store = RedbStore::open(dir.join("kopano.redb"))?;
-        let key_bytes: [u8; 32] = std::fs::read(dir.join("device.key"))?.try_into().map_err(|_| anyhow!("bad device key"))?;
+        let key_bytes = keystore::load(dir)?;
         let key = DeviceKey::from_bytes(key_bytes);
         let cert: DeviceCert = serde_json::from_slice(&std::fs::read(dir.join("cert.json"))?)?;
         let pid = Id::parse(std::fs::read_to_string(dir.join("project"))?.trim())?;
@@ -137,8 +139,12 @@ async fn read_frame(r: &mut iroh::endpoint::RecvStream) -> Result<Vec<u8>> {
     if n > MAX_FRAME {
         bail!("frame of {n} bytes refused");
     }
+    // A frame that starts must finish at a living pace (security pass: a slow sender held memory
+    // and a connection slot forever). 64 MiB at 100 kbit/s would take 90 minutes, so the deadline
+    // grows with the size: 30 s plus 1 s per 16 KiB.
+    let deadline = std::time::Duration::from_secs(30 + (n / 16_384) as u64);
     let mut buf = vec![0u8; n];
-    r.read_exact(&mut buf).await?;
+    tokio::time::timeout(deadline, r.read_exact(&mut buf)).await.map_err(|_| anyhow!("frame of {n} bytes too slow"))??;
     Ok(buf)
 }
 
@@ -158,27 +164,72 @@ impl std::fmt::Debug for SyncHandler {
     }
 }
 
+/// Security pass (flood test E26): connections that have not yet shown a valid certificate wait in
+/// a small room of WAITING slots; when it is full the OLDEST waiter is pushed out, not the newcomer,
+/// so a member's handshake (one round trip) gets through unless a stranger opens WAITING new
+/// connections within that round trip. Each waiter has HANDSHAKE_S to show a certificate.
+/// Members who got in share MAX_MEMBERS slots.
+const WAITING: usize = 16;
+const HANDSHAKE_S: u64 = 5;
+const MAX_MEMBERS: usize = 64;
+static MEMBERS_IN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ROOM: std::sync::Mutex<std::collections::VecDeque<(u64, Connection)>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+static TICKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn room_enter(conn: &Connection) -> u64 {
+    let t = TICKETS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut room = ROOM.lock().unwrap_or_else(|e| e.into_inner());
+    while room.len() >= WAITING {
+        if let Some((_, old)) = room.pop_front() {
+            old.close(2u32.into(), b"crowded");
+        }
+    }
+    room.push_back((t, conn.clone()));
+    t
+}
+fn room_leave(ticket: u64) {
+    ROOM.lock().unwrap_or_else(|e| e.into_inner()).retain(|(t, _)| *t != ticket);
+}
+
 impl ProtocolHandler for SyncHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        if let Err(e) = self.serve(conn).await {
+        let ticket = room_enter(&conn);
+        let mut member = false;
+        if let Err(e) = self.serve(conn, ticket, &mut member).await {
             eprintln!("[serve] connection ended: {e:#}");
+        }
+        room_leave(ticket);
+        if member {
+            MEMBERS_IN.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
     }
 }
 
 impl SyncHandler {
-    async fn serve(&self, conn: Connection) -> Result<()> {
+    async fn serve(&self, conn: Connection, ticket: u64, member: &mut bool) -> Result<()> {
         let remote = *conn.remote_id().as_bytes();
-        let (mut send, mut recv) = conn.accept_bi().await?;
+        let hello = async {
+            let (send, mut recv) = conn.accept_bi().await?;
+            let cert = read_frame(&mut recv).await?;
+            anyhow::Ok((send, recv, cert))
+        };
+        let (mut send, mut recv, cert) = tokio::time::timeout(std::time::Duration::from_secs(HANDSHAKE_S), hello).await.map_err(|_| anyhow!("no certificate within {HANDSHAKE_S} s"))??;
         // 1. Mutual identity: they show their certificate first, we check it, then show ours.
-        let their: DeviceCert = serde_json::from_slice(&read_frame(&mut recv).await?)?;
+        let their: DeviceCert = serde_json::from_slice(&cert)?;
         if let Err(e) = self.peer.check_peer(&their, &remote) {
             write_frame(&mut send, format!("refused: {e}").as_bytes()).await?;
             send.finish()?;
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), send.stopped()).await;
             bail!("refused {}: {e}", their.body.name);
         }
+        room_leave(ticket);
+        if MEMBERS_IN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_MEMBERS {
+            MEMBERS_IN.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            conn.close(1u32.into(), b"busy");
+            bail!("too many members connected");
+        }
+        *member = true;
         write_frame(&mut send, &serde_json::to_vec(&self.peer.cert)?).await?;
         eprintln!("[serve] {} ({}) connected", their.body.name, their.body.device_label);
         // 2. Requests until they close.
@@ -392,6 +443,37 @@ async fn connect(peer: &Peer, from: &Path, relay_only: bool, alpn: &[u8]) -> Res
     Ok((ep, conn, ms, path))
 }
 
+/// Security pass: a stranger (fresh key, no certificate) opens `n` sync connections and sends
+/// nothing, to see whether members can still get in. Lab only.
+async fn flood(from: &Path, n: usize, hold_s: u64) -> Result<()> {
+    let addr: EndpointAddr = serde_json::from_slice(&std::fs::read(from)?)?;
+    let mut held = vec![];
+    let (mut opened, mut refused) = (0, 0);
+    // keep opening new silent connections until `hold_s` is over (at most n held at once)
+    let end = Instant::now() + std::time::Duration::from_secs(hold_s);
+    while Instant::now() < end {
+        if held.len() >= n {
+            held.remove(0);
+        }
+        let sk = SecretKey::from_bytes(&DeviceKey::generate().to_bytes());
+        let ep = Endpoint::builder(presets::N0).secret_key(sk).bind().await?;
+        match ep.connect(addr.clone(), SYNC_ALPN).await {
+            Ok(c) => match c.open_bi().await {
+                Ok((mut s, r)) => {
+                    let _ = s.write_all(&[0, 0]).await; // half a length prefix, then silence
+                    opened += 1;
+                    held.push((ep, c, s, r));
+                }
+                Err(_) => refused += 1,
+            },
+            Err(_) => refused += 1,
+        }
+    }
+    let alive = held.iter().filter(|(_, c, _, _)| c.close_reason().is_none()).count();
+    println!("{}", serde_json::json!({"event": "flood", "seconds": hold_s, "opened": opened, "refused": refused, "alive_at_end": alive}));
+    Ok(())
+}
+
 async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool, compact: bool) -> Result<()> {
     let closure = closure || compact;
     let peer = Peer::open(dir)?;
@@ -425,31 +507,12 @@ async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool, compact:
         rounds = 1;
         let hdr: serde_json::Value = serde_json::from_slice(&read_frame(&mut recv).await?)?;
         if compact {
-            let raw = hdr.get("raw").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+            let raw = hdr.get("raw").and_then(|n| n.as_u64()).unwrap_or(0);
             let z = read_frame(&mut recv).await?;
             bytes += z.len() as u64;
-            let payload = miniz_oxide::inflate::decompress_to_vec_with_limit(&z, raw.min(1 << 30)).map_err(|e| anyhow!("bad compressed reply: {e:?}"))?;
-            let mut at = 0usize;
-            while at < payload.len() {
-                let kind = payload[at];
-                let len = u32::from_le_bytes(payload.get(at + 1..at + 5).context("truncated record")?.try_into()?) as usize;
-                let data = payload.get(at + 5..at + 5 + len).context("truncated record")?;
-                at += 5 + len;
-                let b = match kind {
-                    0 => data.to_vec(),
-                    1 => {
-                        let base = Id(data.get(..32).context("delta without base")?.try_into()?);
-                        tree::apply_node_delta(&peer.store.get(&base)?, &data[32..])?
-                    }
-                    _ => bail!("unknown record kind {kind}"),
-                };
-                let id = Id::of(&b);
-                peer.store.put_verified(&id, &b)?;
-                objects += 1;
-                if b.first() == Some(&b'{') && serde_json::from_slice::<project::Version>(&b).is_ok() {
-                    new_versions.push(id);
-                }
-            }
+            let d = kopano_core::wire::decode_compact(&peer.store, &z, raw as u64)?;
+            objects += d.objects;
+            new_versions.extend(d.versions);
             // records come oldest first; the check below walks the list backwards
             new_versions.reverse();
         }
@@ -878,29 +941,6 @@ fn repair(dir: &Path) -> Result<()> {
 
 // ---- E20 daemon: one process holds the project, serves, takes app edits, pushes and follows ----
 
-async fn compact_fetch(peer: &Peer, send: &mut iroh::endpoint::SendStream, recv: &mut iroh::endpoint::RecvStream) -> Result<(Vec<Id>, u64)> {
-    let have: Vec<String> = peer.head().into_iter().map(|h| h.hex()).collect();
-    write_frame(send, &serde_json::to_vec(&serde_json::json!({"op": "closure2", "have": have}))?).await?;
-    let hdr: serde_json::Value = serde_json::from_slice(&read_frame(recv).await?)?;
-    let raw = hdr.get("raw").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
-    let z = read_frame(recv).await?;
-    let payload = miniz_oxide::inflate::decompress_to_vec_with_limit(&z, raw.min(1 << 30)).map_err(|e| anyhow!("bad compressed reply: {e:?}"))?;
-    let (mut at, mut versions) = (0usize, vec![]);
-    while at < payload.len() {
-        let kind = payload[at];
-        let len = u32::from_le_bytes(payload.get(at + 1..at + 5).context("truncated")?.try_into()?) as usize;
-        let data = payload.get(at + 5..at + 5 + len).context("truncated")?;
-        at += 5 + len;
-        let b = if kind == 1 { tree::apply_node_delta(&peer.store.get(&Id(data.get(..32).context("base")?.try_into()?))?, &data[32..])? } else { data.to_vec() };
-        let id = Id::of(&b);
-        peer.store.put_verified(&id, &b)?;
-        if b.first() == Some(&b'{') && serde_json::from_slice::<project::Version>(&b).is_ok() {
-            versions.push(id);
-        }
-    }
-    Ok((versions, z.len() as u64))
-}
-
 async fn open_sync(ep: Endpoint, addr: EndpointAddr, peer: Arc<Peer>) -> Result<(Connection, iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     let conn = ep.connect(addr, SYNC_ALPN).await?;
     let (mut s, mut r) = conn.open_bi().await?;
@@ -921,21 +961,8 @@ async fn follow(peer: Arc<Peer>, ep: Endpoint, from: PathBuf) -> Result<()> {
         let z = read_frame(&mut wr).await?;
         let t = Instant::now();
         let Some(h) = note.get("head").and_then(|h| h.as_str()).and_then(|h| Id::parse(h).ok()) else { continue };
-        let raw = note.get("raw").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
-        let payload = miniz_oxide::inflate::decompress_to_vec_with_limit(&z, raw.min(1 << 30)).map_err(|e| anyhow!("bad pushed change: {e:?}"))?;
-        let (mut at, mut versions) = (0usize, vec![]);
-        while at < payload.len() {
-            let kind = payload[at];
-            let len = u32::from_le_bytes(payload.get(at + 1..at + 5).context("truncated")?.try_into()?) as usize;
-            let data = payload.get(at + 5..at + 5 + len).context("truncated")?;
-            at += 5 + len;
-            let b = if kind == 1 { tree::apply_node_delta(&peer.store.get(&Id(data.get(..32).context("base")?.try_into()?))?, &data[32..])? } else { data.to_vec() };
-            let id = Id::of(&b);
-            peer.store.put_verified(&id, &b)?;
-            if b.first() == Some(&b'{') && serde_json::from_slice::<project::Version>(&b).is_ok() {
-                versions.push(id);
-            }
-        }
+        let raw = note.get("raw").and_then(|n| n.as_u64()).unwrap_or(0);
+        let versions = kopano_core::wire::decode_compact(&peer.store, &z, raw)?.versions;
         for v in &versions {
             project::verify_version(&peer.store, &peer.project, v)?;
         }
@@ -1054,6 +1081,11 @@ async fn main() -> Result<()> {
             &arg(&args, "--message").unwrap_or_else(|| "Edit".into()),
         ),
         "status" => status(&need_dir()?),
+        "protect-key" => {
+            let name = keystore::protect(&need_dir()?)?;
+            println!("{}", serde_json::json!({"protected": true, "entry": name}));
+            Ok(())
+        }
         "reset" => {
             // Lab only: empty this peer (keeps its key and certificate), re-seed the genesis from `--like`.
             let d = need_dir()?;
@@ -1074,6 +1106,7 @@ async fn main() -> Result<()> {
         "verify" => verify(&need_dir()?),
         "corrupt" => corrupt(&need_dir()?),
         "repair" => repair(&need_dir()?),
+        "flood" => flood(Path::new(&arg(&args, "--from").context("--from")?), arg(&args, "--n").map(|n| n.parse()).transpose()?.unwrap_or(100), arg(&args, "--hold-s").map(|n| n.parse()).transpose()?.unwrap_or(20)).await,
         "hash-of" => {
             let peer = Peer::open(&need_dir()?)?;
             let app = peer.app()?;

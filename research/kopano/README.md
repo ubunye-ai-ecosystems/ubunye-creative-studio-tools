@@ -11,6 +11,7 @@ This folder is research and a prototype, not product code. Branch: `research/kop
 | [03-performance.md](03-performance.md) | C. Benchmarks E1 to E10 with environment, bottlenecks, projections |
 | [04-proof-of-concept.md](04-proof-of-concept.md) | D. Two-peer proof of concept over iroh |
 | [05-roadmap.md](05-roadmap.md) | E. Production phases with tests and exit criteria |
+| [06-security.md](06-security.md) | G. Threat model, attacks tried, fixes, and what is still open |
 | [tech-assessment-raw.md](tech-assessment-raw.md) | Technology research with sources and a decision matrix |
 | [`../../08-collaboration-plan.md`](../../08-collaboration-plan.md) | F. The original plan, with a dated revision at the top |
 | `lab/` | Rust prototype: `kopano-core` (neutral core), `kopano-lab` (toy editor, Light connector, benchmarks, two-peer `peer` binary) |

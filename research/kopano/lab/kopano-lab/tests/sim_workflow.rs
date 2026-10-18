@@ -210,7 +210,16 @@ impl World {
         let prev = tips.get(name).map(|(id, u)| (*id, u.seq));
         let project = self.project(i)?;
         let p = &mut self.peers[i];
-        let mt = wf::member_tips(&p.store, &p.members);
+        let mut mt = wf::member_tips(&p.store, &p.members);
+        let mut prev = prev;
+        if p.behaviour == Behaviour::Cheat && self.rng.gen_bool(0.3) {
+            // a smarter cheat: cite no members (backdate) and/or claim a huge seq
+            mt.clear();
+            if self.rng.gen_bool(0.5) {
+                prev = prev.map(|(id, _)| (id, 1_000_000));
+            }
+            self.stats.cheats += 1;
+        }
         let id = wf::update_ref(&p.store, &project, name, version, prev, &mt, &p.cert, &p.key)?;
         p.refs.insert(id);
         p.ok_versions.insert(*version);
@@ -348,6 +357,11 @@ impl World {
         let id = wf::add_member_entry(&p.store, &project, tips, op, &p.cert, &p.key)?;
         p.members.insert(id);
         self.stats.member_changes += 1;
+        // seal: re-sign main at the same version, citing the new members
+        if let Some((_, mu)) = self.tips(i)?.get(MAIN).cloned() {
+            let v = Id::parse(&mu.version)?;
+            self.move_ref(i, MAIN, &v)?;
+        }
         Ok(())
     }
 

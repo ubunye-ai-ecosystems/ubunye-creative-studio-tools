@@ -141,14 +141,21 @@ fn merge_clash<H: Harness>(h: &H) -> Result<()> {
         Integrated::Merged { conflicts, .. } => ensure!(conflicts.len() == 1, "expected one clash, got {}", conflicts.len()),
         _ => bail!("expected a merge"),
     }
-    ensure!((t.alice_app.get_number(&t.key, &t.f1)? - 0.4).abs() < 1e-9, "the local value was overwritten");
+    // Since E17 a clash takes the same value whoever merges (deterministic pick), so the app shows
+    // one of the two values and the record keeps both.
+    let now = t.alice_app.get_number(&t.key, &t.f1)?;
+    ensure!((now - 0.4).abs() < 1e-9 || (now - 0.9).abs() < 1e-9, "the merged value is neither person's");
     let recs = ra.conflicts()?;
     ensure!(recs.len() == 1, "the clash was not recorded");
     let rec = recs.values().next().ok_or_else(|| anyhow!("no record"))?;
-    let theirs = rec.state.get("theirs").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("record lacks theirs"))?;
-    let theirs_item = Item::get(&t.env.stores[0], &Id::parse(theirs)?)?;
     let ptr = format!("/{}", t.f1.replace('.', "/"));
-    ensure!(theirs_item.state.pointer(&ptr) == Some(&serde_json::json!(0.9)), "the other person's value was not preserved");
+    let mut kept = vec![];
+    for side in ["mine", "theirs"] {
+        let id = rec.state.get(side).and_then(|v| v.as_str()).ok_or_else(|| anyhow!("record lacks {side}"))?;
+        kept.extend(Item::get(&t.env.stores[0], &Id::parse(id)?)?.state.pointer(&ptr).and_then(|v| v.as_f64()));
+    }
+    kept.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ensure!(kept == vec![0.4, 0.9], "the record does not keep both values: {kept:?}");
     let head = ra.head.ok_or_else(|| anyhow!("no head after merge"))?;
     crate::project::verify_version(&t.env.stores[0], &ra.project, &head)?;
     Ok(())

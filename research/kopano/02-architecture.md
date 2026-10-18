@@ -97,6 +97,8 @@ Boundaries stated precisely (the mission's rule against claiming "zero cloud"):
 
 ## 4. Threats and how the design answers them (summary)
 
+The full threat model and attack results are in [06-security.md](06-security.md) (2026-10-18). This table is the original summary.
+
 | Threat | Answer | Status |
 |---|---|---|
 | Peer impersonation | iroh TLS binds connection to device key; certificate must name that key | Implemented, tested (E5 step 7) |
@@ -106,6 +108,6 @@ Boundaries stated precisely (the mission's rule against claiming "zero cloud"):
 | Withholding newer heads (freeze) | pull from several peers + control-plane head hint | Proposed |
 | Equivocation (one device forks) | both forks are visible in the DAG and merge like any other | Proposed check |
 | Damaged disk / bit rot | every read re-hashes; damaged objects removed and refetched | Tested (E5 step 12) |
-| Malicious large frames / disk fill | frame cap 64 MiB, batch cap 10k; media gate allows only members; iroh-blobs ≥ 0.103.1 | Partly implemented; quotas Proposed |
+| Malicious large frames / disk fill | frame cap 64 MiB, batch cap 10k, unpacked payload cap 64 MiB, frame deadlines, stranger waiting room; media gate allows only members; iroh-blobs ≥ 0.103.1 | Implemented and tested (06); quotas Proposed |
 | Lost device | revoke in control plane; certificate expiry; rotate project key if encryption at rest is added | Proposed |
 | Metadata exposure | relay sees endpoint ids, IPs, timing; control plane sees membership | Documented, accepted |

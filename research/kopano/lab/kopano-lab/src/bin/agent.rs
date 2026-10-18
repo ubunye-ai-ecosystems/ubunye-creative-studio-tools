@@ -10,6 +10,9 @@
 //! Requests: {"op":"info"} | {"op":"serve-addr"} | {"op":"serve","relay_only":bool,"env":{..}}
 //!           | {"op":"run","args":[..],"files":{"name.json":"content"},"env":{..},"timeout_s":N}
 
+#[path = "../keystore.rs"]
+#[allow(dead_code)]
+mod keystore;
 use anyhow::{anyhow, bail, Context, Result};
 use iroh::endpoint::{presets, Connection};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -327,7 +330,7 @@ async fn run_agent(args: &[String]) -> Result<()> {
 
 async fn call(args: &[String]) -> Result<()> {
     let dir = PathBuf::from(arg(args, "--dir").context("--dir")?);
-    let key: [u8; 32] = std::fs::read(dir.join("device.key"))?.try_into().map_err(|_| anyhow!("bad device key"))?;
+    let key: [u8; 32] = keystore::load(&dir)?;
     let to: [u8; 32] = hex::decode(arg(args, "--to").context("--to")?)?.try_into().map_err(|_| anyhow!("bad id"))?;
     let req: Value = serde_json::from_str(&arg(args, "--json").context("--json")?)?;
     let ep = Endpoint::builder(presets::N0).secret_key(SecretKey::from_bytes(&key)).bind().await?;
