@@ -111,9 +111,16 @@ impl Peer {
         if lan_only() {
             // E32/E35: no internet at all. No relay, no address lookup: only the addresses in the
             // teammate's addr file (a QR code in an app), over the local network.
-            return Ok(Endpoint::builder(presets::Minimal).secret_key(sk).alpns(alpns).relay_mode(iroh::endpoint::RelayMode::Disabled).bind().await?);
+            let mut b = Endpoint::builder(presets::Minimal).secret_key(sk).alpns(alpns).relay_mode(iroh::endpoint::RelayMode::Disabled);
+            if let Some(t) = transport() {
+                b = b.transport_config(t);
+            }
+            return Ok(b.bind().await?);
         }
         let mut b = Endpoint::builder(presets::N0).secret_key(sk).alpns(alpns);
+        if let Some(t) = transport() {
+            b = b.transport_config(t);
+        }
         if let Ok(u) = std::env::var("KOPANO_RELAY_URL") {
             // Our own relay instead of n0's public ones.
             let url: iroh::RelayUrl = u.parse().context("KOPANO_RELAY_URL")?;
@@ -128,6 +135,21 @@ impl Peer {
     async fn blobs(&self) -> Result<iroh_blobs::store::fs::FsStore> {
         Ok(iroh_blobs::store::fs::FsStore::load(self.dir.join("media")).await?)
     }
+}
+
+/// E35: QUIC's default congestion control reads every lost packet as "the network is full" and
+/// slows down; on lossy radio links that throttles for nothing. KOPANO_CC=bbr uses BBRv3, which
+/// paces by measured bandwidth and delay instead. E35b: at 1% loss BBRv3 made a 50 MB download 34x
+/// faster and a join 6x faster, at no cost on a clean link, so it is the default.
+/// KOPANO_CC=default (iroh's own), cubic or reno for comparisons.
+fn transport() -> Option<iroh::endpoint::QuicTransportConfig> {
+    let cc: Arc<dyn iroh::endpoint::ControllerFactory + Send + Sync> = match std::env::var("KOPANO_CC").as_deref() {
+        Ok("default") => return None,
+        Ok("cubic") => Arc::new(noq_proto::congestion::CubicConfig::default()),
+        Ok("reno") => Arc::new(noq_proto::congestion::NewRenoConfig::default()),
+        _ => Arc::new(noq_proto::congestion::Bbr3Config::default()),
+    };
+    Some(iroh::endpoint::QuicTransportConfig::builder().congestion_controller_factory(cc).build())
 }
 
 fn lan_only() -> bool {

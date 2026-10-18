@@ -1929,6 +1929,7 @@ dependencies = [
  "keyring",
  "kopano-core",
  "miniz_oxide",
+ "noq-proto",
  "rand 0.8.8",
  "redb",
  "serde",

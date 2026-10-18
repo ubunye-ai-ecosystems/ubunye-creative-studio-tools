@@ -1,0 +1,443 @@
+{
+ "experiment": "E35 Linux loss sweep, direct QUIC (KOPANO_LAN_ONLY=1), 100 ms RTT",
+ "date": "2026-10-18",
+ "method": "Vercel Sandbox cpt1 (kernel 6.18.49, Ubuntu 26.04). tc netem NOT available (no sch_netem, kernel has only pfifo; no modprobe; nft lacks numgen/limit/queue, iptables lacks statistic). Substitute: userspace UDP proxy (50 ms each way, Bernoulli loss each direction, 1000-packet queue like netem default) made transparent by nft DNAT: every UDP packet uid 1000 sends to alice port is rewritten to the proxy; alice packets not going to the proxy are dropped; IPv6 disabled by sysctl (Udp6OutDatagrams delta 0 in every run). One sandbox per loss level, 2 vCPU each.",
+ "binary": "peer cross-compiled x86_64-unknown-linux-musl with cargo-zigbuild 0.23.4 + ziglang 0.13.0, stripped (21.9 MB)",
+ "media_mb": 50,
+ "cap_s": 900,
+ "levels": [
+  {
+   "loss_pct": 0,
+   "join_s": 2.21,
+   "join_ok": true,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:41043)",
+    "connect_ms": 101,
+    "transfer_ms": 1553,
+    "verify_ms": 140,
+    "objects": 36859,
+    "bytes": 2202335,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_s": 5.51,
+   "media_ms_reported": 5161,
+   "mbit_s": 81.27,
+   "complete": true,
+   "media_event": {
+    "event": "media",
+    "hash": "e8d28aab",
+    "path": "Ip(169.254.0.2:41043)",
+    "connect_ms": 102,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 5161,
+    "mbit_s": 82,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 3429,
+    "s2c": 38907,
+    "dropped": 0,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.0,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 41043 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 41043 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 41043 udp dport != 9001-9050 counter packets 20 bytes 1264 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.5,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ],
+   "alice_addrs": [
+    {
+     "Ip": "169.254.0.2:41043"
+    }
+   ],
+   "uname": "Linux 6.18.49"
+  },
+  {
+   "loss_pct": 1,
+   "join_s": 13.26,
+   "join_ok": true,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:51992)",
+    "connect_ms": 101,
+    "transfer_ms": 12544,
+    "verify_ms": 136,
+    "objects": 36859,
+    "bytes": 2202328,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_s": 296.09,
+   "media_ms_reported": 295751,
+   "mbit_s": 1.42,
+   "complete": true,
+   "media_event": {
+    "event": "media",
+    "hash": "6b9e01a4",
+    "path": "Ip(169.254.0.2:51992)",
+    "connect_ms": 102,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 295751,
+    "mbit_s": 1,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 20614,
+    "s2c": 39041,
+    "dropped": 574,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.01,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 51992 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 51992 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 51992 udp dport != 9001-9050 counter packets 58 bytes 3656 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ],
+   "alice_addrs": [
+    {
+     "Ip": "169.254.0.2:51992"
+    }
+   ],
+   "uname": "Linux 6.18.49"
+  },
+  {
+   "loss_pct": 5,
+   "join_s": 28.73,
+   "join_ok": true,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:59909)",
+    "connect_ms": 101,
+    "transfer_ms": 28007,
+    "verify_ms": 209,
+    "objects": 36859,
+    "bytes": 2202332,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_s": 756.86,
+   "media_ms_reported": 755661,
+   "mbit_s": 0.56,
+   "complete": true,
+   "media_event": {
+    "event": "media",
+    "hash": "4c546e73",
+    "path": "Ip(169.254.0.2:59909)",
+    "connect_ms": 102,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 755661,
+    "mbit_s": 1,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 23523,
+    "s2c": 40728,
+    "dropped": 3204,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.05,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 59909 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 59909 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 59909 udp dport != 9001-9050 counter packets 127 bytes 8001 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ],
+   "alice_addrs": [
+    {
+     "Ip": "169.254.0.2:59909"
+    }
+   ],
+   "uname": "Linux 6.18.49"
+  },
+  {
+   "loss_pct": 10,
+   "join_s": 45.53,
+   "join_ok": true,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:55639)",
+    "connect_ms": 102,
+    "transfer_ms": 44812,
+    "verify_ms": 208,
+    "objects": 36859,
+    "bytes": 2202330,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_s": 900.0,
+   "media_ms_reported": null,
+   "mbit_s": null,
+   "complete": null,
+   "media_event": null,
+   "media_err": "timeout > 900 s",
+   "proxy": {
+    "c2s": 21613,
+    "s2c": 34906,
+    "dropped": 5680,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.1,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 55639 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 55639 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 55639 udp dport != 9001-9050 counter packets 154 bytes 9702 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.5,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ],
+   "alice_addrs": [
+    {
+     "Ip": "169.254.0.2:55639"
+    }
+   ],
+   "uname": "Linux 6.18.49"
+  },
+  {
+   "loss_pct": 20,
+   "join_s": 80.17,
+   "join_ok": true,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:38866)",
+    "connect_ms": 101,
+    "transfer_ms": 79451,
+    "verify_ms": 135,
+    "objects": 36859,
+    "bytes": 2202332,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_s": 900.0,
+   "media_ms_reported": null,
+   "mbit_s": null,
+   "complete": null,
+   "media_event": null,
+   "media_err": "timeout > 900 s",
+   "proxy": {
+    "c2s": 16466,
+    "s2c": 24504,
+    "dropped": 8233,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.2,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 38866 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 38866 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 38866 udp dport != 9001-9050 counter packets 160 bytes 10080 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.5,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ],
+   "alice_addrs": [
+    {
+     "Ip": "169.254.0.2:38866"
+    }
+   ],
+   "uname": "Linux 6.18.49"
+  }
+ ]
+}

@@ -1,0 +1,602 @@
+{
+ "experiment": "E35b: default vs KOPANO_CC=bbr, direct QUIC LAN-only, 100 ms RTT, 50 MB, 900 s cap",
+ "date": "2026-10-18",
+ "method": "same as E35 (userspace loss/delay proxy made transparent with nft DNAT, IPv6 off, one Vercel Sandbox cpt1 per run, 2 vCPU); KOPANO_CC set on serve and pull/fetch-media; none = iroh default",
+ "est_note": "delivered_pct_est for timeouts = (s2c*(1-p) - join_pkts*(1+p)) * 1404 B / 52428800, join_pkts 1570, 1404 B/pkt calibrated from E35 0% run; rough upper bound",
+ "runs": [
+  {
+   "name": "d1r",
+   "cc": "none",
+   "loss_pct": 1.0,
+   "join_s": 14.16,
+   "join_ok": true,
+   "media_s": 312.34,
+   "media_ms_reported": 312000,
+   "mbit_s": 1.34,
+   "complete": true,
+   "delivered_pct_est": null,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:55861)",
+    "connect_ms": 102,
+    "transfer_ms": 13457,
+    "verify_ms": 133,
+    "objects": 36859,
+    "bytes": 2202334,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_event": {
+    "event": "media",
+    "hash": "cd837786",
+    "path": "Ip(169.254.0.2:55861)",
+    "connect_ms": 101,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 312000,
+    "mbit_s": 1,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 21465,
+    "s2c": 39050,
+    "dropped": 585,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.01,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 55861 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 55861 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 55861 udp dport != 9001-9050 counter packets 67 bytes 4221 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ]
+  },
+  {
+   "name": "d5",
+   "cc": "none",
+   "loss_pct": 5.0,
+   "join_s": 30.21,
+   "join_ok": true,
+   "media_s": 747.96,
+   "media_ms_reported": 747620,
+   "mbit_s": 0.56,
+   "complete": true,
+   "delivered_pct_est": null,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:52648)",
+    "connect_ms": 101,
+    "transfer_ms": 29463,
+    "verify_ms": 137,
+    "objects": 36859,
+    "bytes": 2202334,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_event": {
+    "event": "media",
+    "hash": "693cc5a6",
+    "path": "Ip(169.254.0.2:52648)",
+    "connect_ms": 102,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 747620,
+    "mbit_s": 1,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 23456,
+    "s2c": 40677,
+    "dropped": 3198,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.05,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 52648 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 52648 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 52648 udp dport != 9001-9050 counter packets 130 bytes 8190 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ]
+  },
+  {
+   "name": "d10",
+   "cc": "none",
+   "loss_pct": 10.0,
+   "join_s": 52.73,
+   "join_ok": true,
+   "media_s": 900.0,
+   "media_ms_reported": null,
+   "mbit_s": null,
+   "complete": null,
+   "delivered_pct_est": 78.0,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:41845)",
+    "connect_ms": 102,
+    "transfer_ms": 52007,
+    "verify_ms": 137,
+    "objects": 36859,
+    "bytes": 2202333,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_event": null,
+   "media_err": "timeout > 900 s",
+   "proxy": {
+    "c2s": 21585,
+    "s2c": 34467,
+    "dropped": 5632,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.1,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 41845 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 41845 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 41845 udp dport != 9001-9050 counter packets 154 bytes 9702 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ]
+  },
+  {
+   "name": "b0r",
+   "cc": "bbr",
+   "loss_pct": 0.0,
+   "join_s": 1.94,
+   "join_ok": true,
+   "media_s": 5.49,
+   "media_ms_reported": 5184,
+   "mbit_s": 80.91,
+   "complete": true,
+   "delivered_pct_est": null,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:45299)",
+    "connect_ms": 101,
+    "transfer_ms": 1297,
+    "verify_ms": 136,
+    "objects": 36859,
+    "bytes": 2202331,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_event": {
+    "event": "media",
+    "hash": "c8a1d30e",
+    "path": "Ip(169.254.0.2:45299)",
+    "connect_ms": 101,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 5184,
+    "mbit_s": 81,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 4417,
+    "s2c": 38857,
+    "dropped": 0,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.0,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 45299 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 45299 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 45299 udp dport != 9001-9050 counter packets 22 bytes 1390 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ]
+  },
+  {
+   "name": "b1",
+   "cc": "bbr",
+   "loss_pct": 1.0,
+   "join_s": 2.21,
+   "join_ok": true,
+   "media_s": 9.61,
+   "media_ms_reported": 9301,
+   "mbit_s": 45.1,
+   "complete": true,
+   "delivered_pct_est": null,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:36668)",
+    "connect_ms": 102,
+    "transfer_ms": 1487,
+    "verify_ms": 137,
+    "objects": 36859,
+    "bytes": 2202334,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_event": {
+    "event": "media",
+    "hash": "51929701",
+    "path": "Ip(169.254.0.2:36668)",
+    "connect_ms": 102,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 9301,
+    "mbit_s": 45,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 4557,
+    "s2c": 39402,
+    "dropped": 420,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.01,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 36668 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 36668 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 36668 udp dport != 9001-9050 counter packets 22 bytes 1390 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.2,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ]
+  },
+  {
+   "name": "b5",
+   "cc": "bbr",
+   "loss_pct": 5.0,
+   "join_s": 2.44,
+   "join_ok": true,
+   "media_s": 641.25,
+   "media_ms_reported": 640941,
+   "mbit_s": 0.65,
+   "complete": true,
+   "delivered_pct_est": null,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:37044)",
+    "connect_ms": 102,
+    "transfer_ms": 1783,
+    "verify_ms": 138,
+    "objects": 36859,
+    "bytes": 2202337,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_event": {
+    "event": "media",
+    "hash": "f370d72a",
+    "path": "Ip(169.254.0.2:37044)",
+    "connect_ms": 101,
+    "had_before": 0,
+    "bytes_received": 52428800,
+    "total_read": 52633544,
+    "ms": 640941,
+    "mbit_s": 1,
+    "complete": true
+   },
+   "media_err": "",
+   "proxy": {
+    "c2s": 21050,
+    "s2c": 40732,
+    "dropped": 3076,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.05,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 37044 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 37044 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 37044 udp dport != 9001-9050 counter packets 112 bytes 7058 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ]
+  },
+  {
+   "name": "b10",
+   "cc": "bbr",
+   "loss_pct": 10.0,
+   "join_s": 2.67,
+   "join_ok": true,
+   "media_s": 900.0,
+   "media_ms_reported": null,
+   "mbit_s": null,
+   "complete": null,
+   "delivered_pct_est": 98.0,
+   "join_event": {
+    "event": "pull",
+    "path": "Ip(169.254.0.2:34931)",
+    "connect_ms": 102,
+    "transfer_ms": 2021,
+    "verify_ms": 140,
+    "objects": 36859,
+    "bytes": 2202331,
+    "rounds": 1,
+    "media_bytes": 0,
+    "result": "fast-forward, 20000 item(s) applied"
+   },
+   "media_event": null,
+   "media_err": "timeout > 900 s",
+   "proxy": {
+    "c2s": 24849,
+    "s2c": 42674,
+    "dropped": 6743,
+    "overflow": 0,
+    "clients": 2,
+    "loss": 0.1,
+    "delay_s": 0.05
+   },
+   "udp6_out_delta": 0,
+   "nft_counters": "meta skuid 1000 ip daddr 127.0.0.0/8 udp dport 34931 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 34931 counter packets 2 bytes 2456 dnat to 169.254.0.2:9000\n\t\tmeta skuid 1000 ip daddr 127.0.0.0/8 udp dport 7777 counter packets 0 bytes 0 dnat to 127.0.0.1:9000\n\t\tmeta skuid 1000 udp dport 7777 counter packets 2 bytes 58 dnat to 169.254.0.2:9000\n\t\tudp sport 34931 udp dport != 9001-9050 counter packets 152 bytes 9579 drop\n\t\tudp sport 7777 udp dport != 9001-9050 counter packets 0 bytes 0 drop",
+   "echo_check": [
+    {
+     "loss_setting": 0.0,
+     "probes": 300,
+     "lost": 0,
+     "rt_loss_pct": 0.0,
+     "expected_rt_loss_pct": 0.0,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 300,
+      "dropped": 0,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.0,
+      "delay_s": 0.05
+     }
+    },
+    {
+     "loss_setting": 0.05,
+     "probes": 300,
+     "lost": 34,
+     "rt_loss_pct": 11.3,
+     "expected_rt_loss_pct": 9.8,
+     "rtt_ms_min": 100.3,
+     "rtt_ms_median": 100.4,
+     "reply_src_ok": true,
+     "proxy": {
+      "c2s": 300,
+      "s2c": 283,
+      "dropped": 34,
+      "overflow": 0,
+      "clients": 1,
+      "loss": 0.05,
+      "delay_s": 0.05
+     }
+    }
+   ]
+  }
+ ]
+}

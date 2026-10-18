@@ -1,0 +1,1 @@
+{"minutes": 60, "edits_pushed_to_each": 1349, "photos": 5000, "owner_edited": 1198, "differ_from_owner": {"bob": 0, "m0": 0, "m1": 0}, "heads_equal": true, "reconnects": 0, "note": "final values compared from each device app.json after the run; the run memory samples were lost when the harness output pipe was closed by a low-memory reap of the waiting shell"}

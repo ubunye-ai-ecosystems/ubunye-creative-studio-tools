@@ -25,7 +25,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 const ALPN: &[u8] = b"kopano/lab-agent/0";
-const ALLOWED: [&str; 7] = ["pull", "fetch-media", "edit", "status", "verify", "hash-of", "render"];
+// v7 adds only commands that cannot read or overwrite arbitrary files on the laptop
+const ALLOWED: [&str; 10] = ["pull", "fetch-media", "edit", "status", "verify", "hash-of", "render", "fetch-swarm", "fetch-folder", "import-bundle"];
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
