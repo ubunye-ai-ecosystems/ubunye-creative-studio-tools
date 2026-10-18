@@ -11,6 +11,7 @@ pub mod jsonmerge;
 pub mod merge;
 pub mod project;
 pub mod repo;
+pub mod seal;
 pub mod store;
 pub mod tree;
 pub mod wire;

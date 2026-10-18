@@ -108,6 +108,11 @@ impl Peer {
     }
     async fn endpoint(&self, relay_only: bool, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
         let sk = SecretKey::from_bytes(&self.key.to_bytes());
+        if lan_only() {
+            // E32/E35: no internet at all. No relay, no address lookup: only the addresses in the
+            // teammate's addr file (a QR code in an app), over the local network.
+            return Ok(Endpoint::builder(presets::Minimal).secret_key(sk).alpns(alpns).relay_mode(iroh::endpoint::RelayMode::Disabled).bind().await?);
+        }
         let mut b = Endpoint::builder(presets::N0).secret_key(sk).alpns(alpns);
         if let Ok(u) = std::env::var("KOPANO_RELAY_URL") {
             // Our own relay instead of n0's public ones.
@@ -123,6 +128,10 @@ impl Peer {
     async fn blobs(&self) -> Result<iroh_blobs::store::fs::FsStore> {
         Ok(iroh_blobs::store::fs::FsStore::load(self.dir.join("media")).await?)
     }
+}
+
+fn lan_only() -> bool {
+    std::env::var("KOPANO_LAN_ONLY").is_ok_and(|v| v == "1")
 }
 
 // ---- framing ----------------------------------------------------------------------------------
@@ -419,7 +428,9 @@ async fn serve(dir: &Path, relay_only: bool) -> Result<()> {
     let blobs_proto = iroh_blobs::BlobsProtocol::new(&blobs, Some(media_gate(allowed)));
     let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: tokio::sync::broadcast::channel(64).0, pushed: Default::default() }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
     let t = Instant::now();
-    router.endpoint().online().await;
+    // E35: "online" means a relay answered. With no internet that never happens, and the device
+    // must still work on the local network, so wait at most 10 s (not at all in LAN-only mode).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(if lan_only() { 0 } else { 10 }), router.endpoint().online()).await;
     let addr = router.endpoint().addr();
     std::fs::write(dir.join("addr.json"), serde_json::to_vec(&addr)?)?;
     eprintln!("[serve] {} online in {} ms, addr written", peer.cert.body.name, t.elapsed().as_millis());
@@ -434,6 +445,9 @@ async fn connect(peer: &Peer, from: &Path, relay_only: bool, alpn: &[u8]) -> Res
     let mut addr: EndpointAddr = serde_json::from_slice(&std::fs::read(from)?)?;
     if relay_only {
         addr = EndpointAddr::from_parts(addr.id, addr.relay_urls().cloned().map(iroh::TransportAddr::Relay));
+    }
+    if lan_only() {
+        addr = EndpointAddr::from_parts(addr.id, addr.ip_addrs().cloned().map(iroh::TransportAddr::Ip));
     }
     let ep = peer.endpoint(relay_only, vec![]).await?;
     let t = Instant::now();
@@ -695,8 +709,16 @@ async fn fetch_ranges(dir: &Path, from: &Path, hash: &str, ranges: &[(u64, u64)]
                     }
                 }
                 iroh_blobs::api::proto::ExportRangesItem::Data(leaf) => {
-                    use std::os::windows::fs::FileExt;
-                    f.seek_write(&leaf.data, leaf.offset)?;
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::FileExt;
+                        f.seek_write(&leaf.data, leaf.offset)?;
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::FileExt;
+                        f.write_all_at(&leaf.data, leaf.offset)?;
+                    }
                     written += leaf.data.len() as u64;
                 }
                 iroh_blobs::api::proto::ExportRangesItem::Error(e) => bail!("export: {e}"),
@@ -889,6 +911,18 @@ async fn import_bundle(dir: &Path, file: &Path) -> Result<()> {
     use std::io::{BufRead, Read};
     let peer = Peer::open(dir)?;
     let t = Instant::now();
+    // a sealed bundle is opened with this device's key first (only member devices can)
+    let mut probe = [0u8; 16];
+    let sealed = std::fs::File::open(file)?.read(&mut probe)? == kopano_core::seal::MAGIC.len() && probe.as_slice() == kopano_core::seal::MAGIC;
+    let opened = dir.join(".bundle-opened");
+    let file: &Path = if sealed {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&opened)?);
+        kopano_core::seal::open(&mut std::io::BufReader::new(std::fs::File::open(file)?), &mut w, peer.key.signing())?;
+        w.into_inner()?.sync_all()?;
+        &opened
+    } else {
+        file
+    };
     let mut f = std::io::BufReader::new(std::fs::File::open(file)?);
     let mut magic = vec![0u8; BUNDLE_MAGIC.len()];
     f.read_exact(&mut magic)?;
@@ -947,7 +981,153 @@ async fn import_bundle(dir: &Path, file: &Path) -> Result<()> {
         }
     }
     blobs.shutdown().await?;
-    println!("{}", serde_json::json!({"event": "bundle-in", "objects": d.objects, "versions": d.versions.len(), "result": result, "media_ok": ok, "media_rejected": bad, "ms": t.elapsed().as_millis()}));
+    drop(f);
+    let _ = std::fs::remove_file(&opened);
+    println!("{}", serde_json::json!({"event": "bundle-in", "sealed": sealed, "objects": d.objects, "versions": d.versions.len(), "result": result, "media_ok": ok, "media_rejected": bad, "ms": t.elapsed().as_millis()}));
+    Ok(())
+}
+
+// ---- E31: one big original from several teammates at once ------------------------------------
+//
+// The file is cut into stripes; every teammate who holds it serves stripes from one shared queue
+// (work stealing), so a fast teammate does more and a slow one less. A stripe whose teammate goes
+// away goes back to the queue. Every 1 KiB chunk is verified against the original's hash, so a
+// teammate cannot slip in wrong bytes, and stripes already held are never fetched again.
+
+async fn fetch_swarm(dir: &Path, from: &str, hash: &str, stripe_mb: u64, relay_only: bool) -> Result<()> {
+    use iroh_blobs::protocol::{ChunkRanges, ChunkRangesExt, GetRequest};
+    let peer = Arc::new(Peer::open(dir)?);
+    let blobs = peer.blobs().await?;
+    let h: iroh_blobs::Hash = hash.parse()?;
+    let sources: Vec<PathBuf> = from.split(',').map(PathBuf::from).collect();
+    let t = Instant::now();
+    // ONE endpoint for all teammates: the same device key on two endpoints at once makes the
+    // relay drop one of them (found the hard way, E31)
+    let ep = peer.endpoint(relay_only, vec![]).await?;
+    let mut conns = vec![];
+    for src in &sources {
+        let mut addr: EndpointAddr = serde_json::from_slice(&std::fs::read(src)?)?;
+        if relay_only {
+            addr = EndpointAddr::from_parts(addr.id, addr.relay_urls().cloned().map(iroh::TransportAddr::Relay));
+        }
+        match ep.connect(addr, iroh_blobs::ALPN).await {
+            Ok(c) => {
+                let path = c.paths().iter().find(|p| p.is_selected()).map(|p| format!("{:?}", p.remote_addr())).unwrap_or_default();
+                conns.push(((), c, 0u128, path));
+            }
+            Err(e) => eprintln!("[swarm] {} unreachable: {e:#}", src.display()),
+        }
+    }
+    let (_, first, _, _) = conns.first().context("no teammate reachable")?;
+    let (size, _) = iroh_blobs::get::request::get_verified_size(first, &h).await?;
+    let stripe = stripe_mb << 20;
+    let total = size.div_ceil(stripe);
+    let queue: Arc<std::sync::Mutex<Vec<u64>>> = Arc::new(std::sync::Mutex::new((0..total).rev().collect()));
+    // endgame: when the queue is empty, an idle teammate also fetches a stripe someone slower is
+    // still on; whichever copy lands first counts (both are verified, the store keeps one)
+    let busy: Arc<std::sync::Mutex<BTreeSet<u64>>> = Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+    let done: Arc<std::sync::Mutex<BTreeSet<u64>>> = Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+    let got: Arc<std::sync::Mutex<Vec<(u64, u32)>>> = Arc::new(std::sync::Mutex::new(vec![(0, 0); conns.len()]));
+    let mut tasks = vec![];
+    for (i, (_ep, conn, _, _)) in conns.iter().enumerate() {
+        let (queue, busy, done, got, blobs, conn) = (queue.clone(), busy.clone(), done.clone(), got.clone(), blobs.clone(), conn.clone());
+        tasks.push(tokio::spawn(async move {
+            loop {
+                let next = queue.lock().unwrap().pop().or_else(|| {
+                    let d = done.lock().unwrap();
+                    busy.lock().unwrap().iter().copied().find(|k| !d.contains(k))
+                });
+                let Some(k) = next else { break };
+                busy.lock().unwrap().insert(k);
+                let range = ChunkRanges::bytes(k * stripe..((k + 1) * stripe).min(size));
+                match blobs.remote().execute_get(conn.clone(), GetRequest::blob_ranges(h, range)).complete().await {
+                    Ok(st) => {
+                        let mut g = got.lock().unwrap();
+                        g[i].0 += st.payload_bytes_read;
+                        g[i].1 += 1;
+                        done.lock().unwrap().insert(k);
+                    }
+                    Err(e) => {
+                        busy.lock().unwrap().remove(&k);
+                        if !done.lock().unwrap().contains(&k) {
+                            queue.lock().unwrap().push(k); // someone else takes it
+                        }
+                        eprintln!("[swarm] teammate {i} stopped: {e:#}");
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+    // finished when every stripe landed once; stop whoever is still on a duplicate
+    while done.lock().unwrap().len() < total as usize && tasks.iter().any(|t| !t.is_finished()) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    for t in &tasks {
+        t.abort();
+    }
+    let per: Vec<serde_json::Value> = got.lock().unwrap().iter().enumerate().map(|(i, (b, n))| serde_json::json!({"teammate": i, "path": conns[i].3, "stripes": n, "mb": b / 1_000_000})).collect();
+    let complete = blobs.remote().local(h).await?.is_complete();
+    let ms = t.elapsed().as_millis();
+    println!("{}", serde_json::json!({"event": "swarm", "size_mb": size / 1_000_000, "teammates": per.len(), "per_teammate": per, "complete": complete, "ms": ms, "mbit_s": (size as f64 * 8.0 / 1e6) / (ms as f64 / 1000.0)}));
+    for (_, conn, _, _) in conns {
+        conn.close(0u32.into(), b"done");
+    }
+    ep.close().await;
+    blobs.shutdown().await?;
+    Ok(())
+}
+
+// ---- E34: many small files as one collection: one request for all, not one per file -----------
+
+async fn add_folder(dir: &Path, folder: &Path) -> Result<()> {
+    use iroh_blobs::format::collection::Collection;
+    let peer = Peer::open(dir)?;
+    let blobs = peer.blobs().await?;
+    let t = Instant::now();
+    let mut items = vec![];
+    let mut bytes = 0u64;
+    let mut files: Vec<_> = std::fs::read_dir(folder)?.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).collect();
+    files.sort_by_key(|e| e.file_name());
+    for e in files {
+        let tag = blobs.blobs().add_path(std::path::absolute(e.path())?).await?;
+        bytes += e.metadata()?.len();
+        items.push((e.file_name().to_string_lossy().to_string(), tag.hash));
+    }
+    let n = items.len();
+    let root = Collection::from_iter(items).store(&blobs).await?;
+    println!("{}", serde_json::json!({"event": "add-folder", "hash": root.hash().to_hex(), "files": n, "bytes": bytes, "ms": t.elapsed().as_millis()}));
+    blobs.shutdown().await?;
+    Ok(())
+}
+
+async fn fetch_folder(dir: &Path, from: &Path, hash: &str, one_by_one: bool, relay_only: bool) -> Result<()> {
+    use iroh_blobs::format::collection::Collection;
+    let peer = Peer::open(dir)?;
+    let blobs = peer.blobs().await?;
+    let h: iroh_blobs::Hash = hash.parse()?;
+    let (ep, conn, connect_ms, path) = connect(&peer, from, relay_only, iroh_blobs::ALPN).await?;
+    let t = Instant::now();
+    let (mut bytes, mut requests) = (0u64, 0u64);
+    if one_by_one {
+        // the naive way: the list, then one request per file
+        bytes += blobs.remote().fetch(conn.clone(), iroh_blobs::HashAndFormat::raw(h)).complete().await?.payload_bytes_read;
+        requests += 1;
+        let seq: Vec<iroh_blobs::Hash> = iroh_blobs::hashseq::HashSeq::try_from(blobs.blobs().get_bytes(h).await?)?.into_iter().collect();
+        for c in seq {
+            bytes += blobs.remote().fetch(conn.clone(), iroh_blobs::HashAndFormat::raw(c)).complete().await?.payload_bytes_read;
+            requests += 1;
+        }
+    } else {
+        bytes += blobs.remote().fetch(conn.clone(), iroh_blobs::HashAndFormat::hash_seq(h)).complete().await?.payload_bytes_read;
+        requests += 1;
+    }
+    let ms = t.elapsed().as_millis();
+    conn.close(0u32.into(), b"done");
+    ep.close().await;
+    let files = Collection::load(h, &*blobs).await.map(|c| c.iter().count()).unwrap_or(0);
+    println!("{}", serde_json::json!({"event": "fetch-folder", "one_by_one": one_by_one, "path": path, "connect_ms": connect_ms, "files": files, "requests": requests, "bytes": bytes, "ms": ms}));
+    blobs.shutdown().await?;
     Ok(())
 }
 
@@ -1174,7 +1354,9 @@ async fn daemon(dir: &Path, port: u16, follow_from: Option<PathBuf>, relay_only:
     let ep = peer.endpoint(relay_only, vec![SYNC_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]).await?;
     let blobs_proto = iroh_blobs::BlobsProtocol::new(&blobs, None);
     let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: heads.clone(), pushed: Default::default() }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
-    router.endpoint().online().await;
+    // E35: "online" means a relay answered. With no internet that never happens, and the device
+    // must still work on the local network, so wait at most 10 s (not at all in LAN-only mode).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(if lan_only() { 0 } else { 10 }), router.endpoint().online()).await;
     std::fs::write(dir.join("addr.json"), serde_json::to_vec(&router.endpoint().addr())?)?;
     if let Some(f) = follow_from {
         let (p, e) = (peer.clone(), router.endpoint().clone());
@@ -1275,7 +1457,24 @@ async fn main() -> Result<()> {
         "render" => render(&need_dir()?, &arg(&args, "--key").context("--key")?, Path::new(&arg(&args, "--out").context("--out")?)).await,
         "import" => import(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "daemon" => daemon(&need_dir()?, arg(&args, "--port").context("--port")?.parse()?, arg(&args, "--follow").map(PathBuf::from), relay_only).await,
+        "fetch-swarm" => fetch_swarm(&need_dir()?, &arg(&args, "--from").context("--from a.json,b.json")?, &arg(&args, "--hash").context("--hash")?, arg(&args, "--stripe-mb").map(|n| n.parse()).transpose()?.unwrap_or(8), relay_only).await,
+        "add-folder" => add_folder(&need_dir()?, Path::new(&arg(&args, "--folder").context("--folder")?)).await,
+        "fetch-folder" => fetch_folder(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), &arg(&args, "--hash").context("--hash")?, args.iter().any(|a| a == "--one-by-one"), relay_only).await,
         "export-bundle" => export_bundle(&need_dir()?, arg(&args, "--have"), &args_after(&args, "--media"), Path::new(&arg(&args, "--out").context("--out")?)).await,
+        "seal-bundle" => {
+            // seal for the given member devices (an app would take them from the members log)
+            let to: Vec<ed25519_dalek::VerifyingKey> = arg(&args, "--to").context("--to cert.json,...")?.split(',').map(|c| {
+                let cert: DeviceCert = serde_json::from_slice(&std::fs::read(c)?)?;
+                kopano_core::identity::parse_key(&cert.body.device)
+            }).collect::<Result<_>>()?;
+            let input = arg(&args, "--file").context("--file")?;
+            let out = arg(&args, "--out").context("--out")?;
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&out)?);
+            let n = kopano_core::seal::seal(&mut std::io::BufReader::new(std::fs::File::open(&input)?), &mut w, &to)?;
+            w.into_inner()?.sync_all()?;
+            println!("{}", serde_json::json!({"event": "sealed", "recipients": to.len(), "bytes": n}));
+            Ok(())
+        }
         "import-bundle" => import_bundle(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "add-media" => add_media(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "edit" => edit(

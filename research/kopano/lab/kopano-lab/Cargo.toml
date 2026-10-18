@@ -21,9 +21,11 @@ rand.workspace = true
 redb = "4"
 miniz_oxide = "=0.8.9"
 futures-lite = "=2.6.1"
+ed25519-dalek.workspace = true
 keyring = { version = "=3.6.3", features = ["windows-native", "apple-native"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
 miniz_oxide = "=0.8.9"
 futures-lite = "=2.6.1"
+ed25519-dalek.workspace = true
