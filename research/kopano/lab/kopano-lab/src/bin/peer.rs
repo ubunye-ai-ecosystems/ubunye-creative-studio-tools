@@ -24,7 +24,7 @@ use iroh::endpoint::{presets, Connection};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use kopano_core::connector::Connector;
-use kopano_core::identity::{DeviceCert, DeviceKey, Provider};
+use kopano_core::identity::{now_ms, DeviceCert, DeviceKey, Provider};
 use kopano_core::project::{self, AssetRef, Item, Member, Project, Role};
 use kopano_core::repo::{Integrated, Repo};
 use kopano_core::store::{Id, ObjectStore, RedbStore};
@@ -147,6 +147,8 @@ async fn read_frame(r: &mut iroh::endpoint::RecvStream) -> Result<Vec<u8>> {
 #[derive(Clone)]
 struct SyncHandler {
     peer: Arc<Peer>,
+    /// E20: new heads announced to watchers (the daemon pushes; plain `serve` never sends)
+    heads: tokio::sync::broadcast::Sender<Id>,
 }
 impl std::fmt::Debug for SyncHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -185,6 +187,28 @@ impl SyncHandler {
             };
             let req: serde_json::Value = serde_json::from_slice(&req)?;
             match req.get("op").and_then(|o| o.as_str()) {
+                Some("watch") => {
+                    // push: each new head goes out WITH the change (compact, relative to what this
+                    // watcher already has), so the watcher applies it without asking: half a round trip.
+                    let mut rx = self.heads.subscribe();
+                    let mut known: Vec<Id> = req.get("have").and_then(|h| h.as_array()).into_iter().flatten().filter_map(|h| h.as_str().and_then(|s| Id::parse(s).ok())).filter(|h| self.peer.store.has(h)).collect();
+                    let mut next = self.peer.head();
+                    loop {
+                        if let Some(h) = next {
+                            if !known.contains(&h) {
+                                let (records, raw, z) = compact_payload(&self.peer, &known)?;
+                                write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"head": h.hex(), "ms": now_ms(), "records": records, "raw": raw}))?).await?;
+                                write_frame(&mut send, &z).await?;
+                                known = vec![h];
+                            }
+                        }
+                        match rx.recv().await {
+                            Ok(h) => next = Some(h),
+                            Err(_) => break,
+                        }
+                    }
+                    break;
+                }
                 Some("heads") => {
                     let heads: Vec<String> = self.peer.head().into_iter().map(|h| h.hex()).collect();
                     write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"heads": heads, "project": self.peer.project.id.hex()}))?).await?;
@@ -221,62 +245,9 @@ impl SyncHandler {
                     }
                 }
                 Some("closure2") => {
-                    // E19 compact closure: oldest version first; changed tree nodes as deltas from the
-                    // node at the same place in the parent tree (which the client has, or receives
-                    // earlier in this same reply); everything deflated as one payload.
                     let have: Vec<Id> = req.get("have").and_then(|h| h.as_array()).into_iter().flatten().filter_map(|h| h.as_str().and_then(|s| Id::parse(s).ok())).filter(|h| self.peer.store.has(h)).collect();
-                    let known: BTreeSet<Id> = project::history(&self.peer.store, &have)?.into_iter().map(|(id, _)| id).collect();
-                    let mut versions: Vec<(Id, project::Version)> = project::history(&self.peer.store, &self.peer.head().into_iter().collect::<Vec<_>>())?.into_iter().filter(|(id, _)| !known.contains(id)).collect();
-                    versions.reverse();
-                    let mut sent: HashSet<Id> = HashSet::new();
-                    let mut payload: Vec<u8> = Vec::new();
-                    let mut records = 0u64;
-                    let mut put = |kind: u8, data: &[u8], payload: &mut Vec<u8>| {
-                        payload.push(kind);
-                        payload.extend((data.len() as u32).to_le_bytes());
-                        payload.extend(data);
-                    };
-                    for (vid, v) in &versions {
-                        let parent_tree = match v.parents()?.first() {
-                            Some(p) => project::load_version(&self.peer.store, p)?.tree()?,
-                            None => None,
-                        };
-                        let mut pairs = vec![];
-                        tree::delta_bases(&self.peer.store, v.tree()?, parent_tree, &mut pairs)?;
-                        let mut nodes: HashSet<Id> = HashSet::new();
-                        for (nid, base) in &pairs {
-                            nodes.insert(*nid);
-                            if !sent.insert(*nid) {
-                                continue;
-                            }
-                            let nb = self.peer.store.get(nid)?;
-                            let delta = base.and_then(|b| self.peer.store.get(&b).ok().and_then(|ob| tree::node_delta(&ob, &nb).map(|d| (b, d))));
-                            match delta {
-                                Some((b, d)) => {
-                                    let mut rec = b.0.to_vec();
-                                    rec.extend(d);
-                                    put(1, &rec, &mut payload);
-                                }
-                                None => put(0, &nb, &mut payload),
-                            }
-                            records += 1;
-                        }
-                        // items (and anything else) the client lacks
-                        let mut miss = vec![];
-                        tree::missing(&self.peer.store, v.tree()?, parent_tree, &mut miss)?;
-                        for id in miss {
-                            if nodes.contains(&id) || !sent.insert(id) {
-                                continue;
-                            }
-                            put(0, &self.peer.store.get(&id)?, &mut payload);
-                            records += 1;
-                        }
-                        put(0, &self.peer.store.get(vid)?, &mut payload);
-                        sent.insert(*vid);
-                        records += 1;
-                    }
-                    let z = miniz_oxide::deflate::compress_to_vec(&payload, 6);
-                    write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"records": records, "raw": payload.len(), "compressed": z.len()}))?).await?;
+                    let (records, raw, z) = compact_payload(&self.peer, &have)?;
+                    write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"records": records, "raw": raw, "compressed": z.len()}))?).await?;
                     write_frame(&mut send, &z).await?;
                 }
                 _ => bail!("unknown request"),
@@ -284,6 +255,62 @@ impl SyncHandler {
         }
         Ok(())
     }
+}
+
+
+/// E19/E20 compact reply: oldest version first; changed tree nodes as deltas from the node at the
+/// same place in the parent tree; everything deflated. Returns (records, raw bytes, compressed).
+fn compact_payload(peer: &Peer, have: &[Id]) -> Result<(u64, usize, Vec<u8>)> {
+    let known: BTreeSet<Id> = project::history(&peer.store, have)?.into_iter().map(|(id, _)| id).collect();
+    let mut versions: Vec<(Id, project::Version)> = project::history(&peer.store, &peer.head().into_iter().collect::<Vec<_>>())?.into_iter().filter(|(id, _)| !known.contains(id)).collect();
+    versions.reverse();
+    let mut sent: HashSet<Id> = HashSet::new();
+    let mut payload: Vec<u8> = Vec::new();
+    let mut records = 0u64;
+    let put = |kind: u8, data: &[u8], payload: &mut Vec<u8>| {
+        payload.push(kind);
+        payload.extend((data.len() as u32).to_le_bytes());
+        payload.extend(data);
+    };
+    for (vid, v) in &versions {
+        let parent_tree = match v.parents()?.first() {
+            Some(p) => project::load_version(&peer.store, p)?.tree()?,
+            None => None,
+        };
+        let mut pairs = vec![];
+        tree::delta_bases(&peer.store, v.tree()?, parent_tree, &mut pairs)?;
+        let mut nodes: HashSet<Id> = HashSet::new();
+        for (nid, base) in &pairs {
+            nodes.insert(*nid);
+            if !sent.insert(*nid) {
+                continue;
+            }
+            let nb = peer.store.get(nid)?;
+            match base.and_then(|b| peer.store.get(&b).ok().and_then(|ob| tree::node_delta(&ob, &nb).map(|d| (b, d)))) {
+                Some((b, d)) => {
+                    let mut rec = b.0.to_vec();
+                    rec.extend(d);
+                    put(1, &rec, &mut payload);
+                }
+                None => put(0, &nb, &mut payload),
+            }
+            records += 1;
+        }
+        let mut miss = vec![];
+        tree::missing(&peer.store, v.tree()?, parent_tree, &mut miss)?;
+        for id in miss {
+            if nodes.contains(&id) || !sent.insert(id) {
+                continue;
+            }
+            put(0, &peer.store.get(&id)?, &mut payload);
+            records += 1;
+        }
+        put(0, &peer.store.get(vid)?, &mut payload);
+        sent.insert(*vid);
+        records += 1;
+    }
+    let z = miniz_oxide::deflate::compress_to_vec(&payload, 6);
+    Ok((records, payload.len(), z))
 }
 
 /// Only project members' devices may fetch media (iroh-blobs event hook).
@@ -324,7 +351,7 @@ async fn serve(dir: &Path, relay_only: bool) -> Result<()> {
     }
     let ep = peer.endpoint(relay_only, vec![SYNC_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]).await?;
     let blobs_proto = iroh_blobs::BlobsProtocol::new(&blobs, Some(media_gate(allowed)));
-    let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone() }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
+    let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: tokio::sync::broadcast::channel(64).0 }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
     let t = Instant::now();
     router.endpoint().online().await;
     let addr = router.endpoint().addr();
@@ -834,6 +861,147 @@ fn repair(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---- E20 daemon: one process holds the project, serves, takes app edits, pushes and follows ----
+
+async fn compact_fetch(peer: &Peer, send: &mut iroh::endpoint::SendStream, recv: &mut iroh::endpoint::RecvStream) -> Result<(Vec<Id>, u64)> {
+    let have: Vec<String> = peer.head().into_iter().map(|h| h.hex()).collect();
+    write_frame(send, &serde_json::to_vec(&serde_json::json!({"op": "closure2", "have": have}))?).await?;
+    let hdr: serde_json::Value = serde_json::from_slice(&read_frame(recv).await?)?;
+    let raw = hdr.get("raw").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+    let z = read_frame(recv).await?;
+    let payload = miniz_oxide::inflate::decompress_to_vec_with_limit(&z, raw.min(1 << 30)).map_err(|e| anyhow!("bad compressed reply: {e:?}"))?;
+    let (mut at, mut versions) = (0usize, vec![]);
+    while at < payload.len() {
+        let kind = payload[at];
+        let len = u32::from_le_bytes(payload.get(at + 1..at + 5).context("truncated")?.try_into()?) as usize;
+        let data = payload.get(at + 5..at + 5 + len).context("truncated")?;
+        at += 5 + len;
+        let b = if kind == 1 { tree::apply_node_delta(&peer.store.get(&Id(data.get(..32).context("base")?.try_into()?))?, &data[32..])? } else { data.to_vec() };
+        let id = Id::of(&b);
+        peer.store.put_verified(&id, &b)?;
+        if b.first() == Some(&b'{') && serde_json::from_slice::<project::Version>(&b).is_ok() {
+            versions.push(id);
+        }
+    }
+    Ok((versions, z.len() as u64))
+}
+
+async fn open_sync(ep: Endpoint, addr: EndpointAddr, peer: Arc<Peer>) -> Result<(Connection, iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+    let conn = ep.connect(addr, SYNC_ALPN).await?;
+    let (mut s, mut r) = conn.open_bi().await?;
+    write_frame(&mut s, &serde_json::to_vec(&peer.cert)?).await?;
+    let their: DeviceCert = serde_json::from_slice(&read_frame(&mut r).await?)?;
+    peer.check_peer(&their, conn.remote_id().as_bytes())?;
+    Ok((conn, s, r))
+}
+
+async fn follow(peer: Arc<Peer>, ep: Endpoint, from: PathBuf) -> Result<()> {
+    let addr: EndpointAddr = serde_json::from_slice(&std::fs::read(&from)?)?;
+    let (_wc, mut ws, mut wr) = open_sync(ep.clone(), addr.clone(), peer.clone()).await?;
+    let have: Vec<String> = peer.head().into_iter().map(|h| h.hex()).collect();
+    write_frame(&mut ws, &serde_json::to_vec(&serde_json::json!({"op": "watch", "have": have}))?).await?;
+    eprintln!("[daemon] following, connection open");
+    loop {
+        let note: serde_json::Value = serde_json::from_slice(&read_frame(&mut wr).await?)?;
+        let z = read_frame(&mut wr).await?;
+        let t = Instant::now();
+        let Some(h) = note.get("head").and_then(|h| h.as_str()).and_then(|h| Id::parse(h).ok()) else { continue };
+        let raw = note.get("raw").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+        let payload = miniz_oxide::inflate::decompress_to_vec_with_limit(&z, raw.min(1 << 30)).map_err(|e| anyhow!("bad pushed change: {e:?}"))?;
+        let (mut at, mut versions) = (0usize, vec![]);
+        while at < payload.len() {
+            let kind = payload[at];
+            let len = u32::from_le_bytes(payload.get(at + 1..at + 5).context("truncated")?.try_into()?) as usize;
+            let data = payload.get(at + 5..at + 5 + len).context("truncated")?;
+            at += 5 + len;
+            let b = if kind == 1 { tree::apply_node_delta(&peer.store.get(&Id(data.get(..32).context("base")?.try_into()?))?, &data[32..])? } else { data.to_vec() };
+            let id = Id::of(&b);
+            peer.store.put_verified(&id, &b)?;
+            if b.first() == Some(&b'{') && serde_json::from_slice::<project::Version>(&b).is_ok() {
+                versions.push(id);
+            }
+        }
+        for v in &versions {
+            project::verify_version(&peer.store, &peer.project, v)?;
+        }
+        let mut app = peer.app()?;
+        let mut repo = peer.repo()?;
+        repo.integrate(&mut app, &h)?;
+        peer.save_app(&app)?;
+        peer.set_head(repo.head)?;
+        peer.store.flush()?;
+        println!(
+            "{{\"event\":\"synced\",\"head\":\"{}\",\"bytes\":{},\"apply_ms\":{},\"edit_ms\":{},\"now_ms\":{}}}",
+            h.short(),
+            z.len(),
+            t.elapsed().as_millis(),
+            note.get("ms").and_then(|m| m.as_u64()).unwrap_or(0),
+            now_ms()
+        );
+    }
+}
+
+async fn daemon(dir: &Path, port: u16, follow_from: Option<PathBuf>, relay_only: bool) -> Result<()> {
+    let dir = &std::path::absolute(dir)?;
+    let peer = Arc::new(Peer::open(dir)?);
+    let blobs = peer.blobs().await?;
+    let heads = tokio::sync::broadcast::channel::<Id>(64).0;
+    let ep = peer.endpoint(relay_only, vec![SYNC_ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]).await?;
+    let blobs_proto = iroh_blobs::BlobsProtocol::new(&blobs, None);
+    let router = Router::builder(ep).accept(SYNC_ALPN, SyncHandler { peer: peer.clone(), heads: heads.clone() }).accept(iroh_blobs::ALPN, blobs_proto).spawn();
+    router.endpoint().online().await;
+    std::fs::write(dir.join("addr.json"), serde_json::to_vec(&router.endpoint().addr())?)?;
+    if let Some(f) = follow_from {
+        let (p, e) = (peer.clone(), router.endpoint().clone());
+        tokio::spawn(async move {
+            if let Err(err) = follow(p, e, f).await {
+                eprintln!("[daemon] follow stopped: {err:#}");
+            }
+        });
+    }
+    // the app side: one JSON request per line on a local port
+    let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    eprintln!("[daemon] online, app port {port}");
+    loop {
+        let (c, _) = l.accept().await?;
+        let (peer, heads) = (peer.clone(), heads.clone());
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let (r, mut w) = c.into_split();
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let reply = (|| -> Result<serde_json::Value> {
+                    let req: serde_json::Value = serde_json::from_str(&line)?;
+                    let key = req["key"].as_str().context("key")?;
+                    let field = req["field"].as_str().context("field")?;
+                    let mut app = peer.app()?;
+                    let item = app.photos.get_mut(key).context("no item")?;
+                    let ptr = format!("/{}", field.replace('.', "/"));
+                    if req["op"] == "get" {
+                        return Ok(item.state.pointer(&ptr).cloned().unwrap_or(serde_json::Value::Null));
+                    }
+                    *item.state.pointer_mut(&ptr).context("no setting")? = req["value"].clone();
+                    let mut repo = peer.repo()?;
+                    let v = repo.save(&mut app, "edit")?;
+                    peer.save_app(&app)?;
+                    peer.set_head(repo.head)?;
+                    if let Some(h) = repo.head {
+                        let _ = heads.send(h);
+                    }
+                    Ok(serde_json::json!({"version": v.map(|v| v.short()), "ms": now_ms()}))
+                })();
+                let out = match reply {
+                    Ok(v) => serde_json::json!({"ok": true, "result": v}),
+                    Err(e) => serde_json::json!({"ok": false, "error": format!("{e:#}")}),
+                };
+                if w.write_all(format!("{out}\n").as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -861,6 +1029,7 @@ async fn main() -> Result<()> {
         }
         "render" => render(&need_dir()?, &arg(&args, "--key").context("--key")?, Path::new(&arg(&args, "--out").context("--out")?)).await,
         "import" => import(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
+        "daemon" => daemon(&need_dir()?, arg(&args, "--port").context("--port")?.parse()?, arg(&args, "--follow").map(PathBuf::from), relay_only).await,
         "add-media" => add_media(&need_dir()?, Path::new(&arg(&args, "--file").context("--file")?)).await,
         "edit" => edit(
             &need_dir()?,

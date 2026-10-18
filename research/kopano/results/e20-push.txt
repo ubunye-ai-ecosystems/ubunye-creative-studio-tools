@@ -1,0 +1,4 @@
+lte synced 10 median 162 max 210 join {'bytes': 91702, 'apply_ms': 87}
+3g synced 10 median 410 max 522 join {'bytes': 91702, 'apply_ms': 105}
+edge synced 10 median 1024 max 1083 join {'bytes': 91701, 'apply_ms': 475}
+flaky synced 10 median 592 max 641 join {'bytes': 91700, 'apply_ms': 621}

@@ -264,6 +264,15 @@ Local iroh-relay behind a proxy that adds one-way delay, caps bandwidth and drop
 - **Join: 342 KB to 92 KB** (deflate over the whole reply; 3.3 to 3.8 x at 1k to 100k photos).
 - **On an open connection a sync is exactly one round trip** (EDGE: 4 x 300 ms = 1.2 s measured 1.28 s). Production: a long-running Kopano service keeps connections open; an edit on EDGE goes from 10 s to about 1.4 s.
 
+**E20 always-on daemon with push** (`peer daemon`, `scenarios/e20_push.py`): one process per device holds the project, serves, takes app edits on a local port and pushes each new version with the change itself (compact, relative to what each watcher has). Edit on one device to applied on the teammate, median of 10, all 10/10 delivered on every profile:
+
+| Network | Before tonight | Daemon, announce then pull | **Daemon, push the change** |
+|---|---|---|---|
+| LTE | 1.1 s | 0.30 s | **0.16 s** |
+| 3G | 3.9 s | 1.0 s | **0.41 s** |
+| EDGE | 10.0 s | 2.1 s | **1.02 s** (floor here: 2 x 300 ms + 2 x 970 B at 100 kbit/s) |
+| Flaky | 3.6 s | 1.1 s | **0.59 s** |
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).
