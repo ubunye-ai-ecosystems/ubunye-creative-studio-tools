@@ -389,3 +389,103 @@ mod tests {
         assert_eq!(get(&s, r2, "k4000").unwrap(), None);
     }
 }
+
+// ---- node deltas (E19): send a changed node as its difference from the node the receiver has ----
+
+/// Difference between two nodes of the same kind, or None (send the whole node). The receiver
+/// rebuilds the exact bytes with `apply_node_delta` and checks them against the node's id.
+pub fn node_delta(old: &[u8], new: &[u8]) -> Option<Vec<u8>> {
+    let (Ok(o), Ok(n)) = (decode(old), decode(new)) else { return None };
+    let mut out = Vec::new();
+    match (o, n) {
+        (Node::Leaf(o), Node::Leaf(n)) => {
+            out.push(b'l');
+            let set: Vec<(&String, &Id)> = n.iter().filter(|(k, v)| o.get(*k) != Some(*v)).collect();
+            let del: Vec<&String> = o.keys().filter(|k| !n.contains_key(*k)).collect();
+            out.extend((set.len() as u32).to_le_bytes());
+            for (k, v) in set {
+                out.extend((k.len() as u32).to_le_bytes());
+                out.extend(k.as_bytes());
+                out.extend(v.0);
+            }
+            out.extend((del.len() as u32).to_le_bytes());
+            for k in del {
+                out.extend((k.len() as u32).to_le_bytes());
+                out.extend(k.as_bytes());
+            }
+        }
+        (Node::Branch(o), Node::Branch(n)) => {
+            out.push(b'b');
+            let set: Vec<(&u8, &(Id, u64))> = n.iter().filter(|(b, v)| o.get(*b) != Some(*v)).collect();
+            let del: Vec<&u8> = o.keys().filter(|b| !n.contains_key(*b)).collect();
+            out.extend((set.len() as u16).to_le_bytes());
+            for (b, (id, c)) in set {
+                out.push(*b);
+                out.extend(id.0);
+                out.extend(c.to_le_bytes());
+            }
+            out.extend((del.len() as u16).to_le_bytes());
+            out.extend(del.into_iter().copied());
+        }
+        _ => return None,
+    }
+    (out.len() < new.len()).then_some(out)
+}
+
+/// Rebuild a node from the receiver's old node and a delta.
+pub fn apply_node_delta(old: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
+    let mut at = 0;
+    let tag = take(delta, &mut at, 1)?[0];
+    match (decode(old)?, tag) {
+        (Node::Leaf(mut m), b'l') => {
+            let n = u32::from_le_bytes(take(delta, &mut at, 4)?.try_into()?) as usize;
+            for _ in 0..n.min(MAX_LEAF * 2) {
+                let kl = u32::from_le_bytes(take(delta, &mut at, 4)?.try_into()?) as usize;
+                let k = String::from_utf8(take(delta, &mut at, kl)?.to_vec())?;
+                let id = Id(take(delta, &mut at, 32)?.try_into()?);
+                m.insert(k, id);
+            }
+            let d = u32::from_le_bytes(take(delta, &mut at, 4)?.try_into()?) as usize;
+            for _ in 0..d.min(MAX_LEAF * 2) {
+                let kl = u32::from_le_bytes(take(delta, &mut at, 4)?.try_into()?) as usize;
+                m.remove(&String::from_utf8(take(delta, &mut at, kl)?.to_vec())?);
+            }
+            Ok(encode(&Node::Leaf(m)))
+        }
+        (Node::Branch(mut m), b'b') => {
+            let n = u16::from_le_bytes(take(delta, &mut at, 2)?.try_into()?) as usize;
+            for _ in 0..n.min(256) {
+                let b = take(delta, &mut at, 1)?[0];
+                let id = Id(take(delta, &mut at, 32)?.try_into()?);
+                let c = u64::from_le_bytes(take(delta, &mut at, 8)?.try_into()?);
+                m.insert(b, (id, c));
+            }
+            let d = u16::from_le_bytes(take(delta, &mut at, 2)?.try_into()?) as usize;
+            for _ in 0..d.min(256) {
+                m.remove(&take(delta, &mut at, 1)?[0]);
+            }
+            Ok(encode(&Node::Branch(m)))
+        }
+        _ => bail!("delta does not match the old node"),
+    }
+}
+
+/// For every node of `new_root` that the receiver (holding `old_root`) lacks, the node at the
+/// same position in the old tree, if any: (new node id, old node id).
+pub fn delta_bases(store: &dyn ObjectStore, new_root: Option<Id>, old_root: Option<Id>, out: &mut Vec<(Id, Option<Id>)>) -> Result<()> {
+    let Some(n) = new_root else { return Ok(()) };
+    if Some(n) == old_root {
+        return Ok(());
+    }
+    out.push((n, old_root));
+    if let (Node::Branch(nm), old) = (load(store, &n)?, old_root.map(|o| load(store, &o)).transpose()?) {
+        let om = match old {
+            Some(Node::Branch(m)) => m,
+            _ => BTreeMap::new(),
+        };
+        for (b, (cid, _)) in nm {
+            delta_bases(store, Some(cid), om.get(&b).map(|(i, _)| *i), out)?;
+        }
+    }
+    Ok(())
+}

@@ -107,6 +107,12 @@ impl<'a> Repo<'a> {
     /// Bring in someone else's verified head.
     pub fn integrate(&mut self, conn: &mut dyn Connector, theirs: &Id) -> Result<Integrated> {
         project::verify_version(self.store, &self.project, theirs)?;
+        self.integrate_checked(conn, theirs)
+    }
+
+    /// `integrate` for a head the caller has already verified under its own rules (v2 checks
+    /// against the live members log, which can differ from the genesis members).
+    pub fn integrate_checked(&mut self, conn: &mut dyn Connector, theirs: &Id) -> Result<Integrated> {
         self.save(conn, "Before bringing in changes")?;
         let Some(mine) = self.head else {
             let t = project::load_version(self.store, theirs)?;

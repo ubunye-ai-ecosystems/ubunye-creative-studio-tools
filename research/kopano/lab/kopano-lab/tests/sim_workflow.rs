@@ -271,7 +271,7 @@ impl World {
         let p = &mut self.peers[i];
         let mut app = App::checkout(&p.store, &mine)?;
         let mut repo = Repo { store: &p.store, project, head: Some(mine), cert: p.cert.clone(), key: DeviceKey::from_bytes(p.key.to_bytes()) };
-        repo.integrate(&mut app, &main)?;
+        repo.integrate_checked(&mut app, &main)?;
         let nv = repo.head.context("no head")?;
         p.ok_versions.insert(nv);
         if nv != mine {

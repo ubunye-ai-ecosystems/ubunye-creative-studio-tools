@@ -19,4 +19,8 @@ iroh.workspace = true
 iroh-blobs.workspace = true
 rand.workspace = true
 redb = "4"
+miniz_oxide = "=0.8.9"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
+
+[dev-dependencies]
+miniz_oxide = "=0.8.9"

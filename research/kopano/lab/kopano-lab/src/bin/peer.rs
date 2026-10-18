@@ -220,6 +220,65 @@ impl SyncHandler {
                         write_frame(&mut send, &self.peer.store.get(&id)?).await?;
                     }
                 }
+                Some("closure2") => {
+                    // E19 compact closure: oldest version first; changed tree nodes as deltas from the
+                    // node at the same place in the parent tree (which the client has, or receives
+                    // earlier in this same reply); everything deflated as one payload.
+                    let have: Vec<Id> = req.get("have").and_then(|h| h.as_array()).into_iter().flatten().filter_map(|h| h.as_str().and_then(|s| Id::parse(s).ok())).filter(|h| self.peer.store.has(h)).collect();
+                    let known: BTreeSet<Id> = project::history(&self.peer.store, &have)?.into_iter().map(|(id, _)| id).collect();
+                    let mut versions: Vec<(Id, project::Version)> = project::history(&self.peer.store, &self.peer.head().into_iter().collect::<Vec<_>>())?.into_iter().filter(|(id, _)| !known.contains(id)).collect();
+                    versions.reverse();
+                    let mut sent: HashSet<Id> = HashSet::new();
+                    let mut payload: Vec<u8> = Vec::new();
+                    let mut records = 0u64;
+                    let mut put = |kind: u8, data: &[u8], payload: &mut Vec<u8>| {
+                        payload.push(kind);
+                        payload.extend((data.len() as u32).to_le_bytes());
+                        payload.extend(data);
+                    };
+                    for (vid, v) in &versions {
+                        let parent_tree = match v.parents()?.first() {
+                            Some(p) => project::load_version(&self.peer.store, p)?.tree()?,
+                            None => None,
+                        };
+                        let mut pairs = vec![];
+                        tree::delta_bases(&self.peer.store, v.tree()?, parent_tree, &mut pairs)?;
+                        let mut nodes: HashSet<Id> = HashSet::new();
+                        for (nid, base) in &pairs {
+                            nodes.insert(*nid);
+                            if !sent.insert(*nid) {
+                                continue;
+                            }
+                            let nb = self.peer.store.get(nid)?;
+                            let delta = base.and_then(|b| self.peer.store.get(&b).ok().and_then(|ob| tree::node_delta(&ob, &nb).map(|d| (b, d))));
+                            match delta {
+                                Some((b, d)) => {
+                                    let mut rec = b.0.to_vec();
+                                    rec.extend(d);
+                                    put(1, &rec, &mut payload);
+                                }
+                                None => put(0, &nb, &mut payload),
+                            }
+                            records += 1;
+                        }
+                        // items (and anything else) the client lacks
+                        let mut miss = vec![];
+                        tree::missing(&self.peer.store, v.tree()?, parent_tree, &mut miss)?;
+                        for id in miss {
+                            if nodes.contains(&id) || !sent.insert(id) {
+                                continue;
+                            }
+                            put(0, &self.peer.store.get(&id)?, &mut payload);
+                            records += 1;
+                        }
+                        put(0, &self.peer.store.get(vid)?, &mut payload);
+                        sent.insert(*vid);
+                        records += 1;
+                    }
+                    let z = miniz_oxide::deflate::compress_to_vec(&payload, 6);
+                    write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"records": records, "raw": payload.len(), "compressed": z.len()}))?).await?;
+                    write_frame(&mut send, &z).await?;
+                }
                 _ => bail!("unknown request"),
             }
         }
@@ -291,7 +350,8 @@ async fn connect(peer: &Peer, from: &Path, relay_only: bool, alpn: &[u8]) -> Res
     Ok((ep, conn, ms, path))
 }
 
-async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool) -> Result<()> {
+async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool, compact: bool) -> Result<()> {
+    let closure = closure || compact;
     let peer = Peer::open(dir)?;
     let (ep, conn, connect_ms, path) = connect(&peer, from, relay_only, SYNC_ALPN).await?;
     let t_all = Instant::now();
@@ -301,7 +361,8 @@ async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool) -> Resul
         // Pipelined: certificate, heads and closure requests leave in one flight (one round trip).
         write_frame(&mut send, br#"{"op":"heads"}"#).await?;
         let have: Vec<String> = peer.head().into_iter().map(|h| h.hex()).collect();
-        write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"op": "closure", "have": have}))?).await?;
+        let op = if compact { "closure2" } else { "closure" };
+        write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"op": op, "have": have}))?).await?;
     }
     let reply = read_frame(&mut recv).await?;
     let their: DeviceCert = serde_json::from_slice(&reply).map_err(|_| anyhow!("{}", String::from_utf8_lossy(&reply)))?;
@@ -321,7 +382,36 @@ async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool) -> Resul
         // The closure request was already sent with the certificate.
         rounds = 1;
         let hdr: serde_json::Value = serde_json::from_slice(&read_frame(&mut recv).await?)?;
-        let n = hdr.get("n").and_then(|n| n.as_u64()).unwrap_or(0).min(10_000_000);
+        if compact {
+            let raw = hdr.get("raw").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+            let z = read_frame(&mut recv).await?;
+            bytes += z.len() as u64;
+            let payload = miniz_oxide::inflate::decompress_to_vec_with_limit(&z, raw.min(1 << 30)).map_err(|e| anyhow!("bad compressed reply: {e:?}"))?;
+            let mut at = 0usize;
+            while at < payload.len() {
+                let kind = payload[at];
+                let len = u32::from_le_bytes(payload.get(at + 1..at + 5).context("truncated record")?.try_into()?) as usize;
+                let data = payload.get(at + 5..at + 5 + len).context("truncated record")?;
+                at += 5 + len;
+                let b = match kind {
+                    0 => data.to_vec(),
+                    1 => {
+                        let base = Id(data.get(..32).context("delta without base")?.try_into()?);
+                        tree::apply_node_delta(&peer.store.get(&base)?, &data[32..])?
+                    }
+                    _ => bail!("unknown record kind {kind}"),
+                };
+                let id = Id::of(&b);
+                peer.store.put_verified(&id, &b)?;
+                objects += 1;
+                if b.first() == Some(&b'{') && serde_json::from_slice::<project::Version>(&b).is_ok() {
+                    new_versions.push(id);
+                }
+            }
+            // records come oldest first; the check below walks the list backwards
+            new_versions.reverse();
+        }
+        let n = if compact { 0 } else { hdr.get("n").and_then(|n| n.as_u64()).unwrap_or(0).min(10_000_000) };
         for _ in 0..n {
             let b = read_frame(&mut recv).await?;
             let id = Id::of(&b);
@@ -747,7 +837,7 @@ async fn main() -> Result<()> {
         )
         .await,
         "serve" => serve(&need_dir()?, relay_only).await,
-        "pull" => pull(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), relay_only, args.iter().any(|a| a == "--closure")).await,
+        "pull" => pull(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), relay_only, args.iter().any(|a| a == "--closure"), args.iter().any(|a| a == "--compact")).await,
         "fetch-media" => {
             let h = arg(&args, "--hash").context("--hash")?;
             if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
