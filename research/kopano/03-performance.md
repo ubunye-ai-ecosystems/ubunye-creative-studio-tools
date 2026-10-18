@@ -233,6 +233,37 @@ About 6 to 8 times faster than the European relay. Caveat: Bob sat next to the r
 
 **Second PC at home.** Not possible to simulate here: virtualisation is off in this PC's firmware (no Windows Sandbox or Hyper-V). A cloud Windows machine would not share the home router. Needs a real second device.
 
+## E15 and E16. Real devices: home laptop (same network) and Soshanguve laptop (another network, about 45 km away)
+A test helper (`agent`, Windows and macOS builds) on each laptop ran a fixed list of Kopano steps on instruction from this PC's key only. Findings, in order of importance:
+- **Two and three collaborators converged to identical state** (fingerprint over all 1,005 items equal on all three devices), including true merges, a three-way clash, laptop-to-laptop work while the owner was offline, laptop-to-laptop media, relay-only, and an outsider ("Carol") refused by the Soshanguve laptop.
+- **Each device rendered the same final image** from its own synced settings (one photo, three people's edits): byte-identical JPEG on all three (`4fe1361d505410cf`).
+- **One identity must never run in two programs at once** (the control tool shared this PC's identity; the relay delivered sync requests to the wrong program). Production: a controller needs its own key.
+- Windows Smart App Control blocks unsigned programs with no override: **code signing is a product requirement**. Two support issues seen: running from inside the zip, and the firewall prompt.
+- n0's nearest public relays were Frankfurt, US East or Asia; our own Cape Town relay gave 0.4 to 0.7 s connects and 0.3 s small syncs to Soshanguve.
+- Find my device (owner's own and his brother's laptops, with consent): Windows location service gave 55 and 63 m accuracy; the IP address guess was 27 to 40 km off; the open BeaconDB had no data for these areas.
+
+## E17. Reliability simulator (`kopano-lab/tests/sim_fuzz.rs`, `sim_workflow.rs`)
+Random teams (2 to 6 people, mixed roles, some cheating), random edits, imports, deletes, restores, member changes, syncs (15% cut off part way). Invariants: agreement, no silent loss, safety, no stuck peer.
+- **Found and fixed: a sync cut off at the wrong moment left the receiver stuck forever** (53 of 100 runs). Cause: the copier stored a version before its parents. Fix: store a version only after its whole closure (`copy_version_closure`). After: 0 stuck.
+- **Found: one shared line merged by everyone does not always converge** (38 of 200 runs; "mine wins" on clashes makes concurrent merges disagree; this is also why 10 people produced 118 clash records). Partial fix: clash outcome identical on every device. Real fix: the owner's model below.
+- **v2 workflow (owner's model): main owned by the creator, one branch per person, approvals into main, signed members log** (`kopano-core/src/workflow.rs`). 500 runs x 300 actions: 34,197 edits, 5,414 approvals, 2,981 member changes, 7,717 cheating attempts, 4,616 cut transfers. First run: 447/500 passed. Fixes: catch-up used the genesis permission check (`integrate_checked`); work judged by the members its update cites (not by what the receiver holds on arrival); a mechanical merge is checkable so anyone may make it; every device judges its own work by the same rules. **Final: 500/500 passed** (38,236 edits, 6,266 approvals, 3,401 member changes, 7,252 cheating attempts, 5,193 cut transfers). No silent loss, no safety violation, no stuck peer.
+
+## E18 to E20. Bad networks, compact sync, open connections (`chaos.rs`, `scenarios/e18_net.sh`, `tests/e19_bytes.rs`)
+Local iroh-relay behind a proxy that adds one-way delay, caps bandwidth and drops connections; both peers relay-only (pessimistic: every message crosses the bad link twice).
+
+| Network | Join 1,000 photos: before / compact | One edit: before / compact / on an open connection | 4 MB photo |
+|---|---|---|---|
+| Local | 0.61 s | 0.53 s / 0.53 s / - | 0.8 s |
+| Fibre 50 Mbit/s, 10 ms | 1.1 s | 0.76 s | 2.1 s |
+| LTE 10 Mbit/s, 30 ms | 2.1 s | 1.1 s / - / **0.17 s** | 5.4 s |
+| 3G 1 Mbit/s, 150 ms | 7.7 s / **5.3 s** | 3.9 s / 3.0 s / **0.62 s** | 40 s |
+| EDGE 100 kbit/s, 300 ms | 37.7 s / **15.8 s** | 10.0 s / 6.8 s / **1.28 s** | 358 s (92% of the link) |
+| Flaky (3G, all connections dropped every 20 s) | 7.7 s / 5.4 s | 3.6 s / 3.1 s | **44 s, one attempt, no restart** |
+
+- **Bytes of one edit: 11.7 KB to 0.97 KB** (1,000 photos), and constant with project size: 13.3 KB to 0.9 KB at 10,000, 20.1 KB to 1.0 KB at 100,000. Method: send each changed tree node as its difference from the node the receiver already holds (rebuilt exactly and hash-checked), deflate the rest. Deflate alone barely helps an edit (hashes do not compress).
+- **Join: 342 KB to 92 KB** (deflate over the whole reply; 3.3 to 3.8 x at 1k to 100k photos).
+- **On an open connection a sync is exactly one round trip** (EDGE: 4 x 300 ms = 1.2 s measured 1.28 s). Production: a long-running Kopano service keeps connections open; an edit on EDGE goes from 10 s to about 1.4 s.
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).

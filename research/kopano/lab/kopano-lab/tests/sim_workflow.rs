@@ -194,10 +194,15 @@ impl World {
         let p = &mut self.peers[i];
         let mut repo = Repo { store: &p.store, project, head, cert: p.cert.clone(), key: DeviceKey::from_bytes(p.key.to_bytes()) };
         let v = repo.save(app, msg)?;
-        if let Some(v) = v {
-            p.ok_versions.insert(v);
+        // judge my own work by the same rule everyone else uses
+        let Some(v) = v else { return Ok(None) };
+        let members = self.current_members(i)?;
+        let project = self.project(i)?;
+        if wf::verify_version_v2(&self.peers[i].store, &project, &members, &v).is_err() {
+            return Ok(None);
         }
-        Ok(v)
+        self.peers[i].ok_versions.insert(v);
+        Ok(Some(v))
     }
 
     fn move_ref(&mut self, i: usize, name: &str, version: &Id) -> Result<Id> {
@@ -273,6 +278,10 @@ impl World {
         let mut repo = Repo { store: &p.store, project, head: Some(mine), cert: p.cert.clone(), key: DeviceKey::from_bytes(p.key.to_bytes()) };
         repo.integrate_checked(&mut app, &main)?;
         let nv = repo.head.context("no head")?;
+        let members = wf::members(&p.store, &Project::load(&p.store, &self.pid)?, &p.members)?;
+        if wf::verify_version_v2(&p.store, &Project::load(&p.store, &self.pid)?, &members, &nv).is_err() {
+            return Ok(());
+        }
         p.ok_versions.insert(nv);
         if nv != mine {
             self.move_ref(i, &b, &nv)?;
@@ -378,15 +387,19 @@ impl World {
         let project = self.project(to)?;
         let current = self.current_members(to)?;
         let p = &mut self.peers[to];
-        let mut by_ref: Vec<(String, Id)> = vec![];
+        // Judge each update's work by the members it cites (the same verdict on every device, whenever
+        // it arrives), not by the members this device happens to hold right now (E17: 2/500 disagreed).
+        let mut by_ref: Vec<(String, Id, Members)> = vec![];
         for r in &fr {
             if wf::check_ref(&p.store, &project, &current, r).is_err() {
                 continue;
             }
             let s = wf::load_ref(&p.store, r)?;
-            by_ref.push((s.update.body.name.clone(), Id::parse(&s.update.body.version)?));
+            let cited: Vec<Id> = s.update.body.members.iter().filter_map(|m| Id::parse(m).ok()).collect();
+            let at = wf::members(&p.store, &project, &wf::member_closure(&p.store, &cited))?;
+            by_ref.push((s.update.body.name.clone(), Id::parse(&s.update.body.version)?, at));
         }
-        for (name, v) in by_ref {
+        for (name, v, at) in by_ref {
             let hist = match project::history(&p.store, &[v]) {
                 Ok(h) => h,
                 Err(e) => bail!("STUCK: {} cannot read history after sync: {e:#}", p.name),
@@ -399,7 +412,7 @@ impl World {
                 let res = if name == MAIN {
                     project::verify_version_by(&p.store, &project, vid, &|_, _| true).map(|_| ())
                 } else {
-                    wf::verify_version_v2(&p.store, &project, &current, vid).map(|_| ())
+                    wf::verify_version_v2(&p.store, &project, &at, vid).map(|_| ())
                 };
                 if res.is_err() {
                     ok = false;
@@ -489,7 +502,18 @@ fn run_seed(seed: u64, ops: usize) -> Result<Stats> {
             break;
         }
         if rounds > 8 {
-            bail!("W1 FAILED: no agreement after {rounds} rounds (same={same}, all approved={all_in})");
+            let mut diff = String::new();
+            let base: BTreeMap<String, Id> = t0.iter().map(|(k, (id, _))| (k.clone(), *id)).collect();
+            for &i in &hc[1..] {
+                let ti: BTreeMap<String, Id> = w.tips(i)?.iter().map(|(k, (id, _))| (k.clone(), *id)).collect();
+                for k in base.keys().chain(ti.keys()).collect::<BTreeSet<_>>() {
+                    if base.get(k) != ti.get(k) {
+                        diff.push_str(&format!(" [{} vs {}: {k} {:?} / {:?}; members {} vs {}]", w.peers[hc[0]].name, w.peers[i].name,
+                            base.get(k).map(|x| x.short()), ti.get(k).map(|x| x.short()), w.peers[hc[0]].members.len(), w.peers[i].members.len()));
+                    }
+                }
+            }
+            bail!("W1 FAILED: no agreement after {rounds} rounds (same={same}, all approved={all_in}){diff}");
         }
     }
     let hc = w.honest_current()?;
@@ -534,10 +558,11 @@ fn run_seed(seed: u64, ops: usize) -> Result<Stats> {
 fn sim_workflow() -> Result<()> {
     let seeds: u64 = std::env::var("SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
     let ops: usize = std::env::var("SIM_OPS").ok().and_then(|s| s.parse().ok()).unwrap_or(150);
+    let start: u64 = std::env::var("SIM_START").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let (mut ok, mut fails) = (0, BTreeMap::<String, u64>::new());
     let mut examples = vec![];
     let mut total = Stats::default();
-    for seed in 0..seeds {
+    for seed in start..start + seeds {
         match run_seed(seed, ops) {
             Ok(s) => {
                 ok += 1;

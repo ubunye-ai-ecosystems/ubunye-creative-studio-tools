@@ -459,9 +459,23 @@ async fn pull(dir: &Path, from: &Path, relay_only: bool, closure: bool, compact:
         frontier = next;
     }
     peer.store.flush()?;
+    let transfer_ms = t_all.elapsed().as_millis();
+    // E20: the cost of further syncs on the connection already open (a long-running service).
+    let repeat: usize = std::env::var("KOPANO_REPEAT").ok().and_then(|r| r.parse().ok()).unwrap_or(0);
+    if repeat > 0 && compact {
+        let have: Vec<String> = their_heads.iter().map(|h| h.hex()).collect();
+        let mut times = vec![];
+        for _ in 0..repeat {
+            let t = Instant::now();
+            write_frame(&mut send, &serde_json::to_vec(&serde_json::json!({"op": "closure2", "have": have}))?).await?;
+            let _hdr = read_frame(&mut recv).await?;
+            let _z = read_frame(&mut recv).await?;
+            times.push(t.elapsed().as_millis() as u64);
+        }
+        println!("{{\"event\":\"open-connection syncs\",\"ms\":{times:?}}}");
+    }
     send.finish()?;
     conn.close(0u32.into(), b"done");
-    let transfer_ms = t_all.elapsed().as_millis();
     // Verify every new version, oldest first (a child's check needs its parents).
     let t = Instant::now();
     for id in new_versions.iter().rev() {

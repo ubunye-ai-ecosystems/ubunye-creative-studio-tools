@@ -223,6 +223,15 @@ pub fn verify_version_by(store: &dyn ObjectStore, project: &Project, id: &Id, ma
         if from_other_parent {
             continue;
         }
+        // A mechanical merge of the two parents' items is reproducible, so anyone may make it,
+        // even in lanes they may not edit (E17: a lane-limited editor catching up from main).
+        if parents.len() == 2 {
+            if let Some(a) = after {
+                if mechanical_merge(store, &parents, other_trees[0], &key, before, a)? {
+                    continue;
+                }
+            }
+        }
         // A new value: the author needs write permission on the lane of what changed.
         for item in [before, after].into_iter().flatten() {
             let lane = Item::get(store, &item)?.lane;
@@ -232,6 +241,21 @@ pub fn verify_version_by(store: &dyn ObjectStore, project: &Project, id: &Id, ma
         }
     }
     Ok(v)
+}
+
+fn mechanical_merge(store: &dyn ObjectStore, parents: &[Id], other_tree: Option<Id>, key: &str, mine: Option<Id>, after: Id) -> Result<bool> {
+    let (Some(m), Some(t)) = (mine, tree::get(store, other_tree, key)?) else { return Ok(false) };
+    let (mi, ti, ai) = (Item::get(store, &m)?, Item::get(store, &t)?, Item::get(store, &after)?);
+    if mi.kind != ti.kind || mi.lane != ti.lane || mi.schema != ti.schema || ai.kind != mi.kind || ai.lane != mi.lane {
+        return Ok(false);
+    }
+    let base_tree = match common_ancestor(store, &parents[0], &parents[1])? {
+        Some(b) => load_version(store, &b)?.tree()?,
+        None => None,
+    };
+    let bi = tree::get(store, base_tree, key)?.map(|b| Item::get(store, &b)).transpose()?;
+    let (state, _) = crate::jsonmerge::merge3(bi.as_ref().map(|i| &i.state), &mi.state, &ti.state);
+    Ok(state == ai.state && (ai.assets == mi.assets || ai.assets == ti.assets))
 }
 
 /// All versions reachable from `heads`, newest first by time.
