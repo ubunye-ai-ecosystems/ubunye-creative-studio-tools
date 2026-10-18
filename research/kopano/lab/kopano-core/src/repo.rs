@@ -70,6 +70,41 @@ impl<'a> Repo<'a> {
         Ok(Some(v))
     }
 
+    /// Save only what changed (E23): the app's change feed instead of a full snapshot, so a save
+    /// costs the same at 1,000 or 1,000,000 items. `None` removes the item.
+    pub fn save_changes(&mut self, info: &crate::connector::ConnectorInfo, changed: Vec<(String, Option<crate::project::Item>)>, message: &str) -> Result<Option<Id>> {
+        let head_tree = self.head_tree()?;
+        let mut changes = Vec::new();
+        for (key, item) in changed {
+            let now = tree::get(self.store, head_tree, &key)?;
+            match item {
+                Some(it) => {
+                    if !info.owns(&it.kind) {
+                        bail!("connector {} returned an item of kind {} it does not own", info.app, it.kind);
+                    }
+                    let id = it.put(self.store)?;
+                    if now != Some(id) {
+                        changes.push((key, Some(id)));
+                    }
+                }
+                None => {
+                    if now.is_some() {
+                        changes.push((key, None));
+                    }
+                }
+            }
+        }
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        let root = tree::update(self.store, head_tree, changes)?;
+        let parents = self.head.into_iter().collect();
+        let v = project::commit(self.store, &self.project, parents, root, message, &self.cert, &self.key)?;
+        self.store.flush()?;
+        self.head = Some(v);
+        Ok(Some(v))
+    }
+
     /// Make the app match the tree of `target`; returns how many items were applied.
     fn apply_tree(&self, conn: &mut dyn Connector, target_tree: Option<Id>) -> Result<usize> {
         let info = conn.info();

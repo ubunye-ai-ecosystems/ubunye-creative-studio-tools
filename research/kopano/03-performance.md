@@ -277,6 +277,15 @@ Local iroh-relay behind a proxy that adds one-way delay, caps bandwidth and drop
 
 **E22 a 4.3 GB original.** Import used 12 MB of memory. Download killed part way (process gone), restarted later: resumed at 2.46 GB, fetched only the remaining 1.84 GB, complete and verified. Speed was bound by the source hard drive (about 25 Mbit/s).
 
+**E23 save cost at scale** (`tests/e23_scale.rs`, `Repo::save_changes`): the connector hands Kopano only what changed (change feed) instead of a full snapshot.
+
+| Photos | Import | Save, full snapshot | **Save, change feed** |
+|---|---|---|---|
+| 10,000 | 0.1 s | 55 ms | **0.19 ms** |
+| 100,000 | 1.0 s | 755 ms | **0.24 ms** |
+| 300,000 | 4.5 s | 3.3 s | **0.6 ms** |
+| 1,000,000 | 18.1 s | 13.8 s | **1.45 ms** |
+
 ## Bottleneck summary (what to optimise, in order)
 1. **Round trips over relays** (E5): dominant cost of a small edit at a distance. Fixed in the lab (E10): one pipelined round trip, 3× faster over the Frankfurt relay.
 2. **Connector full scans** (E6): O(catalogue) per save (264 ms at 10k, 1.7 s at 100k, while the core itself needs under 1 ms). Fix: change feed in the contract (phase 1).
