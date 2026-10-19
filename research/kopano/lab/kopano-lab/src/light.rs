@@ -171,6 +171,20 @@ impl LightConnector {
         self.ids.get(base).copied().with_context(|| format!("Light has no photo {base}"))
     }
 
+    fn all_ids(&mut self) -> Result<Vec<u64>> {
+        let mut ids = Vec::new();
+        loop {
+            let page = self.t.exec("catalog.query", json!({"filter": {}, "offset": ids.len(), "limit": 500}))?;
+            let photos = page.get("photos").and_then(Value::as_array).cloned().unwrap_or_default();
+            ids.extend(photos.iter().filter_map(|p| p.get("id").and_then(Value::as_u64)));
+            let total = page.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if photos.is_empty() || ids.len() >= total {
+                break;
+            }
+        }
+        Ok(ids)
+    }
+
     fn inspect(&mut self, id: u64) -> Result<Value> {
         self.t.exec("photo.inspect", json!({"id": id}))
     }
@@ -190,20 +204,23 @@ impl Connector for LightConnector {
     }
 
     fn snapshot(&mut self) -> Result<BTreeMap<String, Item>> {
-        let mut ids = Vec::new();
-        loop {
-            let page = self.t.exec("catalog.query", json!({"filter": {}, "offset": ids.len(), "limit": 500}))?;
-            let photos = page.get("photos").and_then(Value::as_array).cloned().unwrap_or_default();
-            ids.extend(photos.iter().filter_map(|p| p.get("id").and_then(Value::as_u64)));
-            let total = page.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
-            if photos.is_empty() || ids.len() >= total {
-                break;
+        // S3: Light builds with `photo.inspectMany` answer for the whole library in one request
+        // (one UI frame); older builds are asked photo by photo.
+        let photos = match self.t.exec("photo.inspectMany", json!({})) {
+            Ok(Value::Array(a)) => a,
+            _ => {
+                let ids = self.all_ids()?;
+                let mut v = Vec::with_capacity(ids.len());
+                for id in ids {
+                    v.push(self.inspect(id)?);
+                }
+                v
             }
-        }
+        };
         let mut out = BTreeMap::new();
         self.ids.clear();
-        for id in ids {
-            let p = self.inspect(id)?;
+        for p in photos {
+            let Some(id) = p.get("id").and_then(Value::as_u64) else { continue };
             let key = Self::photo_key(&p);
             self.ids.insert(key.clone(), id);
             let assets = self.original(&p)?;

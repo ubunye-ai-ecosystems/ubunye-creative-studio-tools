@@ -8,6 +8,8 @@ Usage: python s3_light.py <lightcraft.exe> <kopanod.exe> <work dir> <alice lab d
 import json, os, shutil, socket, subprocess, sys, time
 
 LIGHT, K, W, ALICE, M1 = sys.argv[1:6]
+# owner rule 2026-10-19: tests and screenshots use Thabang's own photos (a folder of copies)
+PHOTOS = sys.argv[sys.argv.index('--photos') + 1] if '--photos' in sys.argv else None
 LP, KP = {'a': 18001, 'b': 18002}, {'a': 47111, 'b': 47112}
 res = {}
 
@@ -55,7 +57,7 @@ def kcall(who, **req):
 
 
 def key(p):
-    return p.get('content_hash') or f"{p.get('file_name')}|{p.get('captured')}"
+    return p.get('content_hash') or f"{p.get('fileName') or p.get('file_name')}|{p.get('captured')}"
 
 
 def wait_for(fn, timeout):
@@ -78,11 +80,16 @@ for who, src in (('a', ALICE), ('b', M1)):
 procs = []
 try:
     for who in 'ab':
-        procs.append(subprocess.Popen([LIGHT, '--memory', '--control', str(LP[who])], stdout=subprocess.DEVNULL, stderr=open(f'{W}/light-{who}.log', 'w')))
+        procs.append(subprocess.Popen([LIGHT, '--memory', '--control', str(LP[who])] + (['--no-demo', PHOTOS] if PHOTOS else []), stdout=subprocess.DEVNULL, stderr=open(f'{W}/light-{who}.log', 'w')))
         log = open(f'{W}/{who}/kopanod.log', 'w')
         procs.append(subprocess.Popen([K, 'run', '--home', f'{W}/{who}', '--api-port', str(KP[who])], stdout=log, stderr=log))
     la, lb = Light(LP['a']), Light(LP['b'])
     pa, pb = la.photos(), lb.photos()
+    for _ in range(120):  # imports run on a worker thread
+        if PHOTOS is None or (len(pa) >= len(os.listdir(PHOTOS)) and len(pb) == len(pa)):
+            break
+        time.sleep(1)
+        pa, pb = la.photos(), lb.photos()
     res['photos'] = {'a': len(pa), 'b': len(pb), 'same_keys': sorted(map(key, pa)) == sorted(map(key, pb))}
     while not os.path.exists(f'{W}/b/api.token'):
         time.sleep(0.2)
@@ -100,7 +107,7 @@ try:
     kcall('b', op='join', project=pid, **{'from': adev}, app={'kind': 'light-control', 'port': LP['b']})
     res['join_ms'] = round((time.time() - t0) * 1000)
 
-    target = pa[0]
+    target = next((p for p in pa if str(p.get('fileName', '')).startswith('DSC08379')), pa[0])
     ida = target['id']
     idb = next(p['id'] for p in lb.photos() if key(p) == key(target))
 
@@ -143,10 +150,16 @@ try:
     w = [x for x in ws if 'exposure' in x['id']]
     res['slider_widgets'] = [x['id'] for x in w][:5]
     if w:
-        before = exposure(la, ida)
-        lb.rpc('ui.dragWidget', {'id': w[0]['id'], 'dx': 60, 'steps': 6})
+        before = exposure(lb, idb)
+        lb.rpc('ui.dragWidget', {'id': 'slider:light.exposure', 'dx': -80, 'steps': 8})
+        wait_for(lambda: exposure(lb, idb) != before, 10)  # the drag lands over a few frames
+        time.sleep(0.5)
+        t0 = time.time()
         after_b = exposure(lb, idb)
-        res['slider'] = {'b_value': after_b, 'arrived_in_a_ms': wait_for(lambda: exposure(la, ida) == after_b and after_b != before, 30)}
+        ms = wait_for(lambda: exposure(la, ida) == after_b, 30)
+        res['slider'] = {'before': before, 'member1_dragged_to': after_b, 'arrived_in_alice_ms': ms}
+        time.sleep(1.5)
+        shots('4-after-member1-slider-drag')
     res['status_a'] = kcall('a', op='status', project=pid)
     res['status_b'] = kcall('b', op='status', project=pid)
     res['same_head'] = res['status_a']['head'] == res['status_b']['head']
