@@ -20,7 +20,7 @@ import json, os, shutil, subprocess, sys, time
 
 BIN, ALICE, W = sys.argv[1:4]
 STEPS = set((sys.argv[4] if len(sys.argv) > 4 and not sys.argv[4].startswith('--') else '0,1,2,3,4,5,6').split(','))
-MB = 50
+MB = int(sys.argv[sys.argv.index('--mb') + 1]) if '--mb' in sys.argv else 50  # E39: 5 MB when only the capped free relay connects the houses
 P, AG = os.path.join(BIN, 'peer.exe'), os.path.join(BIN, 'agent.exe')
 ID = {'home': '52f7a285291c0bf09d80cfa3243724379318466ab342bff422170710e05029d8',
       'sosh': 'f2189abd27ffe41cd186316176d58634e0ecaca5efd56e74ef2677b90862651e',
