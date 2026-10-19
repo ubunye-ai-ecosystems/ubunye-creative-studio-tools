@@ -25,6 +25,9 @@ noq-proto = "=1.3.0"
 ed25519-dalek.workspace = true
 keyring = { version = "=3.6.3", features = ["windows-native", "apple-native"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
+# Ubunye Photo connector: tiles travel zstd-compressed and base64-encoded over its control channel.
+ruzstd = "=0.9.0"
+base64 = "0.22"
 
 [dev-dependencies]
 miniz_oxide = "=0.8.9"

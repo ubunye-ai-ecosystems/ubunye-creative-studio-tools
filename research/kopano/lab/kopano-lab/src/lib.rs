@@ -3,6 +3,7 @@
 //! core must not care which app is on the other side.
 
 pub mod light;
+pub mod photo;
 
 use anyhow::{bail, Context, Result};
 use kopano_core::conformance::Harness;
@@ -139,5 +140,89 @@ mod tests {
             }
         }
         assert!(failed.is_empty(), "failed: {failed:?}");
+    }
+
+    /// The same kit against the real Ubunye Photo engine (headless `photocraft-cli serve`, an
+    /// in-memory demo document). Runs only when KOPANO_PHOTO_CLI points at photocraft-cli.
+    #[test]
+    fn ubunye_photo_passes_conformance() {
+        let Ok(cli) = std::env::var("KOPANO_PHOTO_CLI") else {
+            println!("skipped: set KOPANO_PHOTO_CLI");
+            return;
+        };
+        let media = std::env::temp_dir().join(format!("kopano-photo-conformance-{}", std::process::id()));
+        let h = crate::photo::PhotoConnector::headless_demo(&cli, &media).unwrap();
+        let mut failed = Vec::new();
+        for o in kopano_core::conformance::run(&h) {
+            match &o.result {
+                Ok(()) => println!("PASS  {}", o.name),
+                Err(e) => {
+                    println!("FAIL  {}: {e:#}", o.name);
+                    failed.push(o.name);
+                }
+            }
+        }
+        drop(h);
+        let _ = std::fs::remove_dir_all(&media);
+        assert!(failed.is_empty(), "failed: {failed:?}");
+    }
+}
+
+#[cfg(test)]
+mod photo_tiles {
+    use kopano_core::connector::Connector;
+    use kopano_core::identity::{DeviceKey, Provider};
+    use kopano_core::project::Project;
+    use kopano_core::repo::{copy_version_closure, Repo};
+    use kopano_core::store::{MemStore, ObjectStore};
+    use serde_json::json;
+
+    /// A brush stroke on the real Photo engine changes exactly the tile items it touched, and an
+    /// adjustment change moves no pixels at all. Runs only when KOPANO_PHOTO_CLI is set.
+    #[test]
+    fn photo_brush_stroke_moves_only_touched_tiles() {
+        let Ok(cli) = std::env::var("KOPANO_PHOTO_CLI") else {
+            println!("skipped: set KOPANO_PHOTO_CLI");
+            return;
+        };
+        let media = std::env::temp_dir().join(format!("kopano-photo-tiles-{}", std::process::id()));
+        let mut a = crate::photo::PhotoConnector::headless_demo(&cli, &media).unwrap();
+        let provider = Provider::generate();
+        let (sa, sb) = (MemStore::default(), MemStore::default());
+        let key = DeviceKey::generate();
+        let cert = provider.issue("alice", "Alice", &key, "test", 3_600_000).unwrap();
+        let p = Project::create(&sa, "tiles", vec![provider.public_hex()], &cert, &key, Default::default()).unwrap();
+        sb.put_verified(&p.id, &sa.get(&p.id).unwrap()).unwrap();
+        let mut r = Repo { store: &sa, project: Project::load(&sa, &p.id).unwrap(), head: None, cert, key };
+        let s0 = a.snapshot().unwrap();
+        let v0 = r.save(&mut a, "start").unwrap().unwrap();
+        copy_version_closure(&sa, &sb, &v0).unwrap();
+        let changed = |x: &std::collections::BTreeMap<String, kopano_core::project::Item>, y: &std::collections::BTreeMap<String, kopano_core::project::Item>| -> Vec<String> {
+            x.keys().chain(y.keys()).collect::<std::collections::BTreeSet<_>>().into_iter().filter(|k| x.get(*k) != y.get(*k)).cloned().collect()
+        };
+        // One short stroke inside tile (1, 0) of the Retouch layer (tiles are 256 px).
+        let retouch = s0.iter().find(|(k, i)| !k.contains('@') && i.state["name"] == "Retouch").map(|(k, _)| k.trim_start_matches("layer/").to_string()).unwrap();
+        let id = a.layer_id(&retouch).unwrap();
+        a.t.exec("layer.select", json!({"layer": id})).unwrap();
+        a.t.exec("paint.stroke", json!({"points": [[300, 60, 1], [360, 90, 1]], "size": 12, "color": "#2060ff"})).unwrap();
+        let s1 = a.snapshot().unwrap();
+        let keys = changed(&s0, &s1);
+        let v1 = r.save(&mut a, "stroke").unwrap().unwrap();
+        let (_, bytes) = copy_version_closure(&sa, &sb, &v1).unwrap();
+        let media_raw: u64 = keys.iter().filter_map(|k| s1.get(k)).flat_map(|i| &i.assets).map(|x| x.size).sum();
+        println!("{}", json!({"edit": "one brush stroke", "changed": keys, "kopano_bytes": bytes, "media_raw_bytes": media_raw}));
+        assert_eq!(keys, vec![format!("layer/{retouch}@/content/surface@1_0")], "only the touched tile changes");
+        // An adjustment change: one layer item, no media.
+        let (adj, field, _) = kopano_core::conformance::Harness::sample(&a);
+        kopano_core::conformance::Harness::set_number(&mut a, &adj, &field, 0.8).unwrap();
+        let s2 = a.snapshot().unwrap();
+        let keys = changed(&s1, &s2);
+        let v2 = r.save(&mut a, "adjust").unwrap().unwrap();
+        let (_, bytes) = copy_version_closure(&sa, &sb, &v2).unwrap();
+        println!("{}", json!({"edit": "exposure slider", "changed": keys, "kopano_bytes": bytes}));
+        assert_eq!(keys, vec![adj.clone()]);
+        assert!(s2[&adj].assets.is_empty());
+        drop(a);
+        let _ = std::fs::remove_dir_all(&media);
     }
 }
