@@ -1,0 +1,33 @@
+{
+  "about": "Kopano device certificate test vector. Produced by ThabangVision lib/kopano/cert.ts; verified by kopano-core tests/thabangvision_vector.rs. Seeds are the RFC 8032 7.1 test secrets 1 (issuer) and 2 (device). Never use them for anything real.",
+  "issuer_seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "issuer_public": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "device_seed": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+  "device_public": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+  "signed_json": "{\"v\":1,\"account\":\"6f1c2a4e-1d2b-4c3a-9e8f-0123456789ab\",\"name\":\"Thabang \\\"TV\\\" Sekgoto \\\\ A/B éü 日本 😀\",\"device\":\"3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\",\"device_label\":\"Studio PC\\twork\\n\\u0001\",\"issued_ms\":1760875200000,\"expires_ms\":1763467200000}",
+  "cert": {
+    "body": {
+      "v": 1,
+      "account": "6f1c2a4e-1d2b-4c3a-9e8f-0123456789ab",
+      "name": "Thabang \"TV\" Sekgoto \\ A/B éü 日本 😀",
+      "device": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "device_label": "Studio PC\twork\n\u0001",
+      "issued_ms": 1760875200000,
+      "expires_ms": 1763467200000
+    },
+    "signer": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "sig": "abb777f7074435b622c203efb81959f9ba895a755d877c918895d640ec9abbdbc27bda8bfba00e3c9b2041571c1a663dcb8c997b508b2cb01368c2eb07f94c07"
+  },
+  "at_ms_valid": 1760875201000,
+  "at_ms_expired": 1763467200001,
+  "token": {
+    "device_code": "kopano-test-device-code-0123456789abcdef",
+    "message": "kopano-link-token:v1:kopano-test-device-code-0123456789abcdef",
+    "signature": "da101126180c9c0de5fa492c7be3eba104fa903b8e70db5c0009d698105130793ffaf549657af876b634742cbe4d8458ebc2fe81e30b9102c0528efb555cfc0b"
+  },
+  "renew": {
+    "timestamp": 1760875260000,
+    "message": "kopano-cert-renew:v1:3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c:1760875260000",
+    "signature": "e577f2efd0dd832026bc5ff6a903b828ee5ce68e98158112589dd61f0576671b6653e1c4e24ffcebe8117c13472f8d7e1c32e0fa18f33d11b142e59f10a66103"
+  }
+}
