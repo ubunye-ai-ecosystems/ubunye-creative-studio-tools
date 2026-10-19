@@ -6,7 +6,7 @@ whatever happens to the control link, and this driver polls `job` until it is do
 including failures, goes to the log (E37's driver dropped failed calls, so step 2's cause was lost).
 
 Steps (50 MB originals A, B, C on the desktop, BBRv3 everywhere):
-  0 preflight: helper version, network type and firewall rules on each laptop
+  0 preflight: helper version, network type and firewall rules on each laptop; each joins the project
   1 home <- B from the desktop
   2 sosh <- A from the desktop
   3 sosh <- B from home only (laptop to laptop, different networks)
@@ -15,17 +15,23 @@ Steps (50 MB originals A, B, C on the desktop, BBRv3 everywhere):
              (b) the desktop serves LAN-only, home fetches A from it
   6 live edits: desktop edits, both laptops pull; sosh edits, home pulls from sosh, the desktop
     pulls from home; all three heads must match
-Usage: python e37c_real.py <bin dir> <alice dir> <work dir> [steps, e.g. 0,1,2] [--only home]"""
+Usage: python e37c_real.py <bin dir> <alice dir> <work dir> [steps, e.g. 0,1,2] [--who home,sosh,mac] [--id home=<hex>]"""
 import json, os, shutil, subprocess, sys, time
 
 BIN, ALICE, W = sys.argv[1:4]
 STEPS = set((sys.argv[4] if len(sys.argv) > 4 and not sys.argv[4].startswith('--') else '0,1,2,3,4,5,6').split(','))
-ONLY = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None
 MB = 50
 P, AG = os.path.join(BIN, 'peer.exe'), os.path.join(BIN, 'agent.exe')
 ID = {'home': '52f7a285291c0bf09d80cfa3243724379318466ab342bff422170710e05029d8',
-      'sosh': 'f2189abd27ffe41cd186316176d58634e0ecaca5efd56e74ef2677b90862651e'}
-WHO = [ONLY] if ONLY else ['home', 'sosh']
+      'sosh': 'f2189abd27ffe41cd186316176d58634e0ecaca5efd56e74ef2677b90862651e',
+      'mac': '95c76046e5b486e8d187c527c4efee7a8f33f4f8a4fa90ec975e29fbac5af428'}
+# --id home=<hex> points a name at another helper (a rehearsal must never borrow a real
+# laptop's id: two helpers with one id answer each other's requests, found in the v8 rehearsal)
+for i, a in enumerate(sys.argv):
+    if a == '--id':
+        k, v = sys.argv[i + 1].split('=')
+        ID[k] = v
+WHO = sys.argv[sys.argv.index('--who') + 1].split(',') if '--who' in sys.argv else ['home', 'sosh']
 CC = {'KOPANO_CC': 'bbr'}
 os.makedirs(W, exist_ok=True)
 log = open(f'{W}/e37c.log', 'a')
@@ -151,24 +157,25 @@ for name in 'ABC':
                 o.write(os.urandom(1 << 20))
     H[name] = local(['add-media', '--dir', ALICE, '--file', f])['hash']
 
-if '0' in STEPS:
-    for who in WHO:
-        info = call(who, {'op': 'info'})
-        net = call(who, {'op': 'net'})
-        res[f'0_{who}'] = {'helper': info.get('result', {}).get('helper'), 'os': info.get('result', {}).get('os'), 'net': net.get('result') or net.get('error')}
-        # every laptop serves with the same settings as this desktop
-        call(who, {'op': 'serve', 'relay_only': False, 'env': CC})
-    show()
-
 # the desktop serves on a different relay than the control tool (one identity, two programs)
 alice, alice_addr = serve_local(ALICE, {'KOPANO_RELAY_URL': 'https://use1-1.relay.n0.iroh.link./'})
 try:
+    if '0' in STEPS:
+        for who in WHO:
+            info = call(who, {'op': 'info'})
+            net = call(who, {'op': 'net'})
+            res[f'0_{who}'] = {'helper': info.get('result', {}).get('helper'), 'os': info.get('result', {}).get('os'), 'net': net.get('result') or net.get('error')}
+            # every laptop serves with the same settings as this desktop, then joins the project
+            call(who, {'op': 'serve', 'relay_only': False, 'env': CC})
+            res[f'0_{who}']['join'] = step(who, ['pull', '--from', 'a.json', '--compact'], {'a.json': alice_addr})
+        show()
     if '1' in STEPS and 'home' in WHO:
         res['1_home_gets_B_from_desktop'] = media_row(step('home', ['fetch-media', '--from', 'a.json', '--hash', H['B']], {'a.json': alice_addr}))
         show()
-    if '2' in STEPS and 'sosh' in WHO:
-        res['2_sosh_gets_A_from_desktop'] = media_row(step('sosh', ['fetch-media', '--from', 'a.json', '--hash', H['A']], {'a.json': alice_addr}))
-        show()
+    if '2' in STEPS:
+        for who in [w for w in WHO if w != 'home']:
+            res[f'2_{who}_gets_A_from_desktop'] = media_row(step(who, ['fetch-media', '--from', 'a.json', '--hash', H['A']], {'a.json': alice_addr}))
+            show()
     if '3' in STEPS and {'home', 'sosh'} <= set(WHO):
         res['3_sosh_gets_B_from_home'] = media_row(step('sosh', ['fetch-media', '--from', 'h.json', '--hash', H['B']], {'h.json': addr_of('home')}))
         show()

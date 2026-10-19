@@ -10,7 +10,7 @@
 //!   fetch. Media moves only when a peer asks for it; versions never carry media bytes.
 //!
 //! Commands (all take --dir <peer folder>):
-//!   setup   --root R --photos <file>... --video <file>   create provider, alice, bob, project
+//!   setup   --root R --photos <file>... --video <file> [--cert-days N]   create provider, alice, bob, project
 //!   serve   --dir D [--relay-only]                     run until killed; writes D/addr.json
 //!   pull    --dir D --from <addr.json> [--relay-only]  fetch + verify + integrate the peer's head
 //!   fetch-media --dir D --from <addr.json> --hash H [--relay-only]   get one original
@@ -410,6 +410,17 @@ fn compact_payload(peer: &Peer, have: &[Id]) -> Result<(u64, usize, Vec<u8>)> {
     Ok((records, payload.len(), z))
 }
 
+/// E37c: a refused device used to read "that teammate does not have this file", which sent people
+/// looking for the file when the real cause was an expired device certificate.
+fn media_refusal(e: impl std::fmt::Display) -> anyhow::Error {
+    let e = e.to_string();
+    if e.contains("permission") {
+        anyhow!("that teammate refused this device: its device certificate is expired or not a member's; sign in again to renew it ({e})")
+    } else {
+        anyhow!("that teammate does not have this file (yet); try another teammate or the owner ({e})")
+    }
+}
+
 /// Only project members' devices may fetch media (iroh-blobs event hook).
 fn media_gate(allowed: HashSet<[u8; 32]>) -> iroh_blobs::provider::events::EventSender {
     use iroh_blobs::provider::events::{AbortReason, ConnectMode, EventMask, EventSender, ProviderMessage};
@@ -668,7 +679,7 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out:
     {
         // in memory only: the store reserves the whole file on its first write, so nothing may
         // be written before the check
-        let (size, _) = iroh_blobs::get::request::get_verified_size(&conn, &h).await.map_err(|e| anyhow!("that teammate does not have this file (yet); try another teammate or the owner ({e})"))?;
+        let (size, _) = iroh_blobs::get::request::get_verified_size(&conn, &h).await.map_err(media_refusal)?;
         let need = size.saturating_sub(had) + (16 << 20);
         if let Err(e) = reserve(&peer.dir.join("media"), need) {
             conn.close(0u32.into(), b"no space");
@@ -1045,7 +1056,7 @@ async fn fetch_swarm(dir: &Path, from: &str, hash: &str, stripe_mb: u64, relay_o
         }
     }
     let (_, first, _, _) = conns.first().context("no teammate reachable")?;
-    let (size, _) = iroh_blobs::get::request::get_verified_size(first, &h).await?;
+    let (size, _) = iroh_blobs::get::request::get_verified_size(first, &h).await.map_err(media_refusal)?;
     let stripe = stripe_mb << 20;
     let total = size.div_ceil(stripe);
     let queue: Arc<std::sync::Mutex<Vec<u64>>> = Arc::new(std::sync::Mutex::new((0..total).rev().collect()));
@@ -1168,15 +1179,18 @@ async fn add_media(dir: &Path, file: &Path) -> Result<()> {
 
 // ---- setup and local commands -----------------------------------------------------------------
 
-async fn setup(root: &Path, photos: &[String], video: Option<String>, synthetic: usize, extra_peers: usize) -> Result<()> {
+async fn setup(root: &Path, photos: &[String], video: Option<String>, synthetic: usize, extra_peers: usize, cert_days: u64) -> Result<()> {
     std::fs::create_dir_all(root)?;
+    // E37c: one-day certificates and a provider key that is not kept left the real-device test team
+    // locked out a day later; a test that runs for days needs `--cert-days`.
+    let ttl = cert_days * 86_400_000;
     let provider = Provider::generate();
     std::fs::write(root.join("provider.pub"), provider.public_hex())?;
     let (ka, kb, kc) = (DeviceKey::generate(), DeviceKey::generate(), DeviceKey::generate());
-    let ca = provider.issue("acct-alice", "Alice", &ka, "studio-desktop", 86_400_000)?;
-    let cb = provider.issue("acct-bob", "Bob", &kb, "laptop", 86_400_000)?;
+    let ca = provider.issue("acct-alice", "Alice", &ka, "studio-desktop", ttl)?;
+    let cb = provider.issue("acct-bob", "Bob", &kb, "laptop", ttl)?;
     // Carol has a valid account and device, but is not a member of the project.
-    let cc = provider.issue("acct-carol", "Carol", &kc, "laptop", 86_400_000)?;
+    let cc = provider.issue("acct-carol", "Carol", &kc, "laptop", ttl)?;
     let mut members = BTreeMap::new();
     members.insert("acct-bob".to_string(), Member { role: Role::Editor, lanes: vec!["develop".into()] });
     // Hash originals once (as an importer would) and build the toy app's items.
@@ -1192,7 +1206,7 @@ async fn setup(root: &Path, photos: &[String], video: Option<String>, synthetic:
     let mut extra = Vec::new();
     for i in 0..extra_peers {
         let k = DeviceKey::generate();
-        let c = provider.issue(&format!("acct-m{i}"), &format!("Member{i}"), &k, "laptop", 86_400_000)?;
+        let c = provider.issue(&format!("acct-m{i}"), &format!("Member{i}"), &k, "laptop", ttl)?;
         members.insert(c.body.account.clone(), Member { role: Role::Editor, lanes: vec!["develop".into()] });
         extra.push((format!("m{i}"), k, c));
     }
@@ -1462,6 +1476,7 @@ async fn main() -> Result<()> {
             arg(&args, "--video"),
             arg(&args, "--synthetic").map(|s| s.parse()).transpose()?.unwrap_or(0),
             arg(&args, "--extra-peers").map(|s| s.parse()).transpose()?.unwrap_or(0),
+            arg(&args, "--cert-days").map(|s| s.parse()).transpose()?.unwrap_or(1),
         )
         .await,
         "serve" => serve(&need_dir()?, relay_only).await,
