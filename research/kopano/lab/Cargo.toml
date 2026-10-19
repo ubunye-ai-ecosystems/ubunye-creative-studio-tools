@@ -1,7 +1,7 @@
 # Kopano research lab. Isolated workspace: experiments and the prototype core.
 # Not product code. Build output goes outside the repo (CARGO_TARGET_DIR on T:).
 [workspace]
-members = ["kopano-core", "kopano-lab"]
+members = ["kopano-core", "kopano-lab", "kopano-node"]
 resolver = "2"
 
 [workspace.package]

@@ -1938,6 +1938,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kopano-node"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "hex",
+ "iroh",
+ "keyring",
+ "kopano-core",
+ "kopano-lab",
+ "miniz_oxide",
+ "noq-proto",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
