@@ -1,0 +1,61 @@
+name: kopanod
+
+# Builds kopanod, the one Kopano service per computer (research/kopano/09-product-integration.md,
+# slice S4), for Windows, macOS (one universal binary) and Linux, and checks that it starts:
+# `kopanod init` makes a device key and `kopanod id` reads it back. Research branch only.
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/kopano-architecture]
+    paths:
+      - research/kopano/lab/**
+      - .github/workflows/kopanod.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: research/kopano/lab
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+          if [ "${{ runner.os }}" = macOS ]; then rustup target add aarch64-apple-darwin x86_64-apple-darwin; fi
+      - name: Build
+        run: |
+          mkdir -p out
+          if [ "${{ runner.os }}" = macOS ]; then
+            for t in aarch64-apple-darwin x86_64-apple-darwin; do cargo build --release -p kopano-node --target $t; done
+            lipo -create -output out/kopanod target/aarch64-apple-darwin/release/kopanod target/x86_64-apple-darwin/release/kopanod
+            strip -x out/kopanod
+            codesign --force --sign - out/kopanod
+          else
+            cargo build --release -p kopano-node
+            cp target/release/kopanod* out/ 2>/dev/null || true
+            rm -f out/*.d out/*.pdb
+          fi
+          ls -la out
+      - name: Starts and keeps a device key
+        run: |
+          export KOPANO_HOME="$RUNNER_TEMP/kopano-home"
+          a=$(./out/kopanod* init | tail -1)
+          b=$(./out/kopanod* id | tail -1)
+          echo "device id: $a"
+          [ ${#a} -eq 64 ] && [ "$a" = "$b" ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kopanod-${{ runner.os }}
+          path: research/kopano/lab/out/
+          retention-days: 14
