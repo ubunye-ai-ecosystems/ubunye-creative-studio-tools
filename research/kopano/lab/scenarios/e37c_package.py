@@ -12,13 +12,15 @@ Usage: python e37c_package.py <team dir> <keys dir> <windows bin dir> <mac bin d
 import json, os, shutil, sys, zipfile
 
 TEAM, KEYS, WIN, MAC, OUT = sys.argv[1:6]
+# E39: v9 adds `netcheck` and download progress; the Mac zip is skipped when MAC is 'none'
+V = sys.argv[6] if len(sys.argv) > 6 else 'v9'
 OWNER = json.load(open(os.path.join(TEAM, 'alice', 'cert.json')))['body']['device']
 MEMBERS = ['alice', 'bob', 'm0', 'm1']
 SKIP = {'addr.json', 'serve-errors.log', 'media'}  # originals come over the network in the test
 
 WIN_START = r'''@echo off
 cd /d "%~dp0"
-title Kopano test v8 - {title}
+title Kopano test VER - {title}
 if not exist "%~dp0agent.exe" (
   echo This is running from inside the zip file.
   echo Please right-click the zip, choose Extract All, then run this file from the extracted folder.
@@ -30,7 +32,7 @@ pause
 '''
 
 MAC_START = '''#!/bin/bash
-# Kopano test helper v8 for a Mac. Double-click (first time: right-click > Open).
+# Kopano test helper VER for a Mac. Double-click (first time: right-click > Open).
 cd "$(dirname "$0")" || exit 1
 xattr -dr com.apple.quarantine . 2>/dev/null
 chmod +x peer agent
@@ -39,7 +41,7 @@ echo
 read -r -p "Press Enter to close."
 '''
 
-MAC_README = '''Kopano test on a Mac (ThabangVision), version 8, about 30 minutes
+MAC_README = '''Kopano test on a Mac (ThabangVision), version VER, about 30 minutes
 
 1. Double-click the zip to unpack it (the Downloads folder is fine). Delete any old test folder.
 2. Open the folder. RIGHT-click START-Mac.command and choose Open.
@@ -83,33 +85,35 @@ os.makedirs(OUT, exist_ok=True)
 here = os.path.dirname(os.path.abspath(__file__))
 
 # Windows
-w = os.path.join(OUT, 'kopano-test-v8')
+w = os.path.join(OUT, f'kopano-test-{V}')
 shutil.rmtree(w, ignore_errors=True)
 os.makedirs(os.path.join(w, 'keys'))
 for f in ('agent.exe', 'peer.exe'):
     shutil.copy2(os.path.join(WIN, f), w)
 for f in ('home.key', 'soshanguve.key'):
     shutil.copy2(os.path.join(KEYS, f), os.path.join(w, 'keys'))
-for f in ('README.txt', 'ALLOW-same-wifi.cmd', 'REMOVE-same-wifi.cmd'):
+open(os.path.join(w, 'README.txt'), 'w', newline='\r\n').write(open(os.path.join(here, 'e37c_package_files', 'README.txt')).read().replace('version 8', 'version ' + V.lstrip('v')))
+for f in ('ALLOW-same-wifi.cmd', 'REMOVE-same-wifi.cmd'):
     shutil.copy2(os.path.join(here, 'e37c_package_files', f), w)
 for name, member, key in (('home laptop', 'm0', 'home.key'), ('Soshanguve laptop', 'bob', 'soshanguve.key')):
     fn = 'START-home-laptop.cmd' if member == 'm0' else 'START-Soshanguve-laptop.cmd'
-    open(os.path.join(w, fn), 'w', newline='\r\n').write(WIN_START.format(title=name, member=member, key=key, owner=OWNER))
+    open(os.path.join(w, fn), 'w', newline='\r\n').write(WIN_START.replace('VER', V).format(title=name, member=member, key=key, owner=OWNER))
 team_into(w, {'bob', 'm0'})
-zip_dir(w, os.path.join(OUT, 'kopano-test-v8.zip'))
+zip_dir(w, os.path.join(OUT, f'kopano-test-{V}.zip'))
 
 # Mac
-m = os.path.join(OUT, 'kopano-test-v8-mac')
-shutil.rmtree(m, ignore_errors=True)
-os.makedirs(os.path.join(m, 'keys'))
-for f in ('agent', 'peer'):
-    shutil.copy2(os.path.join(MAC, f), m)
-shutil.copy2(os.path.join(KEYS, 'mac.key'), os.path.join(m, 'keys'))
-open(os.path.join(m, 'START-Mac.command'), 'w', newline='\n').write(MAC_START.format(owner=OWNER))
-open(os.path.join(m, 'README-Mac.txt'), 'w', newline='\n').write(MAC_README)
-team_into(m, {'m1'})
-zip_dir(m, os.path.join(OUT, 'kopano-test-v8-mac.zip'), exec_names=('agent', 'peer', 'START-Mac.command'))
+if MAC != 'none':
+    m = os.path.join(OUT, f'kopano-test-{V}-mac')
+    shutil.rmtree(m, ignore_errors=True)
+    os.makedirs(os.path.join(m, 'keys'))
+    for f in ('agent', 'peer'):
+        shutil.copy2(os.path.join(MAC, f), m)
+    shutil.copy2(os.path.join(KEYS, 'mac.key'), os.path.join(m, 'keys'))
+    open(os.path.join(m, 'START-Mac.command'), 'w', newline='\n').write(MAC_START.replace('VER', V).format(owner=OWNER))
+    open(os.path.join(m, 'README-Mac.txt'), 'w', newline='\n').write(MAC_README.replace('VER', V))
+    team_into(m, {'m1'})
+    zip_dir(m, os.path.join(OUT, f'kopano-test-{V}-mac.zip'), exec_names=('agent', 'peer', 'START-Mac.command'))
 
-for z in ('kopano-test-v8.zip', 'kopano-test-v8-mac.zip'):
+for z in (f'kopano-test-{V}.zip',) + ((f'kopano-test-{V}-mac.zip',) if MAC != 'none' else ()):
     p = os.path.join(OUT, z)
     print(json.dumps({'zip': z, 'mb': round(os.path.getsize(p) / 1e6, 1), 'files': len(zipfile.ZipFile(p).namelist())}))

@@ -720,8 +720,32 @@ async fn fetch_media(dir: &Path, from: &Path, hash: &str, relay_only: bool, out:
         }
     }
     let t = Instant::now();
-    let stats = blobs.remote().fetch(conn.clone(), h).complete().await?;
+    // E39: a progress line every 2 s with the path in use, so "slow" and "stuck" can be told
+    // apart and a switch from relay to direct is seen when it happens (E37c step 2 printed
+    // nothing for 30 minutes).
+    let stats = {
+        use futures_lite::StreamExt;
+        let mut s = std::pin::pin!(blobs.remote().fetch(conn.clone(), h).stream());
+        let (mut got, mut last) = (0u64, Instant::now());
+        loop {
+            match s.next().await {
+                Some(iroh_blobs::api::remote::GetProgressItem::Progress(n)) => {
+                    got = n;
+                    if last.elapsed().as_secs() >= 2 {
+                        last = Instant::now();
+                        let p = conn.paths().iter().find(|p| p.is_selected()).map(|p| format!("{:?}", p.remote_addr())).unwrap_or_default();
+                        let secs = t.elapsed().as_secs_f64();
+                        println!("{}", serde_json::json!({"event": "progress", "bytes": got, "s": (secs * 10.0).round() / 10.0, "mbit_s": ((got * 8) as f64 / secs / 1e5).round() / 10.0, "path": p}));
+                    }
+                }
+                Some(iroh_blobs::api::remote::GetProgressItem::Done(st)) => break st,
+                Some(iroh_blobs::api::remote::GetProgressItem::Error(e)) => bail!("download stopped after {} MB ({e}); run it again to continue where it stopped", got / 1_000_000),
+                None => bail!("download stopped after {} MB; run it again to continue where it stopped", got / 1_000_000),
+            }
+        }
+    };
     let ms = t.elapsed().as_millis();
+    let path = conn.paths().iter().find(|p| p.is_selected()).map(|p| format!("{:?}", p.remote_addr())).unwrap_or(path);
     let after = blobs.remote().local(h).await?;
     conn.close(0u32.into(), b"done");
     ep.close().await;
