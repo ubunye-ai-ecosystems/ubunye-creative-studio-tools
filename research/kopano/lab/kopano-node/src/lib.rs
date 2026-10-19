@@ -7,7 +7,8 @@
 //! Home folder:
 //!   device.key, cert.json          this device (key in the OS key store when protected)
 //!   api.token                      apps must show it on the local API
-//!   projects/<id8>/                kopano.redb, project, head, app.json, peers.json
+//!   projects/<id8>/                kopano.redb, project, head, app.json, peers.json, media.json
+//!   media/                         photos' files: blobs, previews, originals (media.rs)
 //!
 //! Sync protocol `kopano/sync/1` = the lab's `kopano/sync/0` plus one frame after the certificate
 //! naming the project, so one endpoint serves every project. Live edits travel as compact pushes
@@ -16,6 +17,7 @@
 
 #[path = "../../kopano-lab/src/keystore.rs"]
 pub mod keystore;
+pub mod media;
 
 use anyhow::{anyhow, bail, Context, Result};
 use iroh::endpoint::{presets, Connection};
@@ -73,6 +75,8 @@ pub struct Proj {
     online: std::sync::Mutex<BTreeMap<String, String>>,
     binding: std::sync::Mutex<Binding>,
     light: std::sync::Mutex<Option<LightConnector>>,
+    /// the node's media (set when the node starts): where preview files live
+    media: std::sync::OnceLock<Arc<media::Media>>,
 }
 
 /// Which app holds this project's items on this device.
@@ -103,36 +107,44 @@ impl Proj {
             online: Default::default(),
             binding: std::sync::Mutex::new(std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy)),
             light: Default::default(),
+            media: Default::default(),
         })
     }
     /// Run `f` against this project's app: the toy editor file, or Light (connected on first use
     /// and again after a dropped connection).
     fn with_app<R>(&self, dev: &Device, f: impl FnOnce(&mut dyn Connector) -> Result<R>) -> Result<R> {
-        let binding = self.binding();
-        tokio::task::block_in_place(|| match &binding {
-            Binding::Toy => {
+        match self.binding() {
+            Binding::Toy => tokio::task::block_in_place(|| {
                 let mut app = self.app()?;
                 let r = f(&mut app)?;
                 self.save_app(&app)?;
                 Ok(r)
+            }),
+            // media.rs: photos whose preview is still on its way count as the project's state
+            _ => self.with_light(dev, |c| f(&mut media::View::new(&self.store, self.head(), c))),
+        }
+    }
+    /// Run `f` against this project's Light window itself (connected on first use and again
+    /// after a dropped connection; a window that connects is brought to the project first).
+    fn with_light<R>(&self, dev: &Device, f: impl FnOnce(&mut LightConnector) -> Result<R>) -> Result<R> {
+        let binding = self.binding();
+        tokio::task::block_in_place(|| {
+            let mut g = self.light.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_none() {
+                let mut c = match &binding {
+                    Binding::LightControl { port } => LightConnector::live(*port).context("Light is not running with its control port")?,
+                    Binding::LightHeadless { cli } => LightConnector::headless(cli)?,
+                    Binding::Toy => unreachable_toy()?,
+                };
+                media::prepare(self.media.get(), self, &mut c);
+                self.reconcile(dev, &mut media::View::new(&self.store, self.head(), &mut c))?;
+                *g = Some(c);
             }
-            b => {
-                let mut g = self.light.lock().unwrap_or_else(|e| e.into_inner());
-                if g.is_none() {
-                    let mut c = match b {
-                        Binding::LightControl { port } => LightConnector::live(*port).context("Light is not running with its control port")?,
-                        Binding::LightHeadless { cli } => LightConnector::headless(cli)?,
-                        Binding::Toy => unreachable_toy()?,
-                    };
-                    self.reconcile(dev, &mut c)?;
-                    *g = Some(c);
-                }
-                let r = f(g.as_mut().context("no app")?);
-                if r.is_err() {
-                    *g = None; // reconnect next time
-                }
-                r
+            let r = f(g.as_mut().context("no app")?);
+            if r.is_err() {
+                *g = None; // reconnect next time
             }
+            r
         })
     }
     /// A window that (re)connects is brought to the project first; it never speaks first.
@@ -272,7 +284,7 @@ impl Proj {
     }
     fn remember(&self, cert: &DeviceCert) {
         let mut n = self.names();
-        let v = json!({"name": cert.body.name, "account": cert.body.account});
+        let v = json!({"name": cert.body.name, "account": cert.body.account, "expires_ms": cert.body.expires_ms});
         if n.get(&cert.body.device) != Some(&v) {
             n.insert(cert.body.device.clone(), v);
             if let Ok(b) = serde_json::to_vec(&n) {
@@ -292,6 +304,8 @@ pub struct Node {
     pub projects: std::sync::RwLock<HashMap<Id, Arc<Proj>>>,
     pub events: broadcast::Sender<Value>,
     endpoint: std::sync::OnceLock<Endpoint>,
+    /// photos' files (media.rs), opened when the node starts
+    media: std::sync::OnceLock<Arc<media::Media>>,
 }
 
 impl Node {
@@ -311,7 +325,7 @@ impl Node {
                 }
             }
         }
-        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default() }))
+        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default(), media: Default::default() }))
     }
 
     pub fn project(&self, id: &str) -> Result<Arc<Proj>> {
@@ -327,7 +341,7 @@ impl Node {
     /// Bind the one endpoint and start following every known teammate device.
     pub async fn start(self: &Arc<Self>) -> Result<Router> {
         let sk = SecretKey::from_bytes(&self.device.key.to_bytes());
-        let mut b = Endpoint::builder(presets::N0).secret_key(sk).alpns(vec![ALPN.to_vec()]);
+        let mut b = Endpoint::builder(presets::N0).secret_key(sk).alpns(vec![ALPN.to_vec(), iroh_blobs::ALPN.to_vec()]);
         if let Some(t) = transport() {
             b = b.transport_config(t);
         }
@@ -336,11 +350,15 @@ impl Node {
             b = b.relay_mode(iroh::endpoint::RelayMode::Custom(iroh::RelayMap::from(url)));
         }
         let ep = b.bind().await?;
-        let router = Router::builder(ep.clone()).accept(ALPN, Hub { node: self.clone() }).spawn();
+        let m = media::Media::open(&self.device.home).await?;
+        let _ = self.media.set(m.clone());
+        let blobs = iroh_blobs::BlobsProtocol::new(&m.store, Some(media::gate(self.clone())));
+        let router = Router::builder(ep.clone()).accept(ALPN, Hub { node: self.clone() }).accept(iroh_blobs::ALPN, blobs).spawn();
         let _ = tokio::time::timeout(Duration::from_secs(10), ep.online()).await;
         let _ = self.endpoint.set(ep);
         let ps: Vec<Arc<Proj>> = self.projects.read().unwrap().values().cloned().collect();
         for p in ps {
+            let _ = p.media.set(m.clone());
             for d in p.peers() {
                 self.follow(p.clone(), d);
             }
@@ -481,6 +499,10 @@ impl Node {
         if p.binding() == Binding::Toy {
             return;
         }
+        if let Some(m) = self.media.get() {
+            let _ = p.media.set(m.clone());
+        }
+        media::spawn(self.clone(), p.clone());
         let node = self.clone();
         tokio::spawn(async move {
             loop {
@@ -534,6 +556,9 @@ impl Node {
         let dir = self.device.home.join("projects").join(&pid.hex()[..8]);
         std::fs::rename(&tmp, &dir)?;
         let p = Arc::new(Proj::open(&dir)?);
+        if let Some(m) = self.media.get() {
+            let _ = p.media.set(m.clone());
+        }
         {
             let mut repo = p.repo(&self.device)?;
             p.with_app(&self.device, |app| repo.save(app, "Project started"))?;
@@ -581,11 +606,21 @@ impl Node {
         std::fs::write(dir.join("binding.json"), serde_json::to_vec(&binding)?)?;
         std::fs::write(dir.join("app.json"), b"{}")?;
         let p = Arc::new(Proj::open(&dir)?);
+        if let Some(m) = self.media.get() {
+            let _ = p.media.set(m.clone());
+        }
         p.add_peer(from)?;
         self.projects.write().unwrap().insert(id, p.clone());
         self.follow(p.clone(), from.to_string());
         self.watch_app(p.clone());
         Ok(p)
+    }
+
+    /// Close the media store so what was just received is kept (E38).
+    pub async fn close(&self) {
+        if let Some(m) = self.media.get() {
+            let _ = m.store.shutdown().await;
+        }
     }
 
     pub fn add_teammate(self: &Arc<Self>, p: Arc<Proj>, device: &str) -> Result<()> {
@@ -752,6 +787,11 @@ impl Hub {
                 Some("genesis") => {
                     write_frame(&mut send, &p.store.get(&p.project.id)?).await?;
                 }
+                Some("media") => {
+                    // a preview or an original of one of this project's photos (media.rs)
+                    let reply = media::offer(&self.node, &p, &req).await;
+                    write_frame(&mut send, &serde_json::to_vec(&reply)?).await?;
+                }
                 Some("heads") => {
                     let heads: Vec<String> = p.head().into_iter().map(|h| h.hex()).collect();
                     write_frame(&mut send, &serde_json::to_vec(&json!({"heads": heads}))?).await?;
@@ -915,6 +955,14 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
             let p = node.project(s("project")?)?;
             let snap = p.with_app(&node.device, |a| a.snapshot())?;
             Ok(serde_json::to_value(snap.keys().collect::<Vec<_>>())?)
+        }
+        "media" => {
+            let p = node.project(s("project")?)?;
+            media::status(node, &p)
+        }
+        "fetch-original" => {
+            let p = node.project(s("project")?)?;
+            media::fetch_original(node, &p, s("key")?)
         }
         "add-teammate" => {
             let p = node.project(s("project")?)?;

@@ -1943,8 +1943,10 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "blake3",
+ "futures-lite",
  "hex",
  "iroh",
+ "iroh-blobs",
  "keyring",
  "kopano-core",
  "kopano-lab",

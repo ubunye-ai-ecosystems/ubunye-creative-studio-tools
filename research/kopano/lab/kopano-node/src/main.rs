@@ -130,6 +130,7 @@ async fn main() -> Result<()> {
                 _ = tokio::signal::ctrl_c() => {}
             }
             router.shutdown().await?;
+            node.close().await;
             Ok(())
         }
         Some("import") => {
