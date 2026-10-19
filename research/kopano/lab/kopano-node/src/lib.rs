@@ -71,7 +71,7 @@ pub struct Proj {
     pushed: std::sync::Mutex<HashMap<(Vec<Id>, Id), Arc<(u64, usize, Vec<u8>)>>>,
     following: std::sync::Mutex<HashSet<String>>,
     online: std::sync::Mutex<BTreeMap<String, String>>,
-    pub binding: Binding,
+    binding: std::sync::Mutex<Binding>,
     light: std::sync::Mutex<Option<LightConnector>>,
 }
 
@@ -101,14 +101,15 @@ impl Proj {
             pushed: Default::default(),
             following: Default::default(),
             online: Default::default(),
-            binding: std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy),
+            binding: std::sync::Mutex::new(std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy)),
             light: Default::default(),
         })
     }
     /// Run `f` against this project's app: the toy editor file, or Light (connected on first use
     /// and again after a dropped connection).
     fn with_app<R>(&self, f: impl FnOnce(&mut dyn Connector) -> Result<R>) -> Result<R> {
-        tokio::task::block_in_place(|| match &self.binding {
+        let binding = self.binding();
+        tokio::task::block_in_place(|| match &binding {
             Binding::Toy => {
                 let mut app = self.app()?;
                 let r = f(&mut app)?;
@@ -132,14 +133,66 @@ impl Proj {
             }
         })
     }
+    pub fn binding(&self) -> Binding {
+        self.binding.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    /// Point this project at the app again, e.g. Light restarted on another control port.
+    pub fn rebind(&self, b: Binding) -> Result<()> {
+        std::fs::write(self.dir.join("binding.json"), serde_json::to_vec(&b)?)?;
+        *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = b;
+        *self.light.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
+    }
+    /// How many photos (items before the `#lane`) differ between two versions.
+    pub fn photos_changed(&self, before: Option<Id>, after: Option<Id>) -> usize {
+        let tree_of = |v: Option<Id>| v.and_then(|v| project::load_version(&self.store, &v).ok()).and_then(|v| v.tree().ok().flatten());
+        let (a, b) = match (tree::entries(&self.store, tree_of(before)), tree::entries(&self.store, tree_of(after))) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => return 0,
+        };
+        let base = |k: &String| k.rsplit_once('#').map(|(x, _)| x.to_string()).unwrap_or_else(|| k.clone());
+        let mut changed = BTreeSet::new();
+        for (k, id) in &b {
+            if a.get(k) != Some(id) && !k.starts_with("conflict") {
+                changed.insert(base(k));
+            }
+        }
+        for k in a.keys() {
+            if !b.contains_key(k) {
+                changed.insert(base(k));
+            }
+        }
+        changed.len()
+    }
     pub fn head(&self) -> Option<Id> {
         std::fs::read_to_string(self.dir.join("head")).ok().and_then(|s| Id::parse(s.trim()).ok())
     }
+    /// Objects first, pointer second: the head file may only name a version whose objects are
+    /// already durable. (S1 found a service stopped between the two pointing at objects it never
+    /// kept, then refusing every sync with "missing object".)
     fn set_head(&self, id: Option<Id>) -> Result<()> {
         match id {
-            Some(h) => kopano_core::store::write_atomic(&self.dir.join("head"), h.hex().as_bytes()),
+            Some(h) => {
+                self.store.flush()?;
+                kopano_core::store::write_atomic(&self.dir.join("head"), h.hex().as_bytes())
+            }
             None => Ok(()),
         }
+    }
+    /// A head left by an older build (or a disk that lied about flushing) that names objects this
+    /// store does not have: forget it and take the project from teammates again, instead of being
+    /// stuck. Only edits that were never durable are lost.
+    fn heal_head(&self) -> Option<String> {
+        let h = self.head()?;
+        let whole = project::history(&self.store, &[h]).and_then(|hist| {
+            for (_, v) in &hist {
+                tree::entries(&self.store, v.tree()?)?;
+            }
+            Ok(())
+        });
+        let e = whole.err()?;
+        let _ = std::fs::rename(self.dir.join("head"), self.dir.join("head.broken"));
+        Some(format!("{e:#}"))
     }
     pub fn app(&self) -> Result<ToyEditor> {
         let photos: BTreeMap<String, Item> = serde_json::from_slice(&std::fs::read(self.dir.join("app.json"))?)?;
@@ -172,6 +225,20 @@ impl Proj {
         kopano_core::store::write_atomic(&self.dir.join("peers.json"), &serde_json::to_vec(&p)?)?;
         Ok(true)
     }
+    /// device -> {name, account}, kept so an offline teammate still shows by name
+    pub fn names(&self) -> BTreeMap<String, Value> {
+        std::fs::read(self.dir.join("names.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+    fn remember(&self, cert: &DeviceCert) {
+        let mut n = self.names();
+        let v = json!({"name": cert.body.name, "account": cert.body.account});
+        if n.get(&cert.body.device) != Some(&v) {
+            n.insert(cert.body.device.clone(), v);
+            if let Ok(b) = serde_json::to_vec(&n) {
+                let _ = kopano_core::store::write_atomic(&self.dir.join("names.json"), &b);
+            }
+        }
+    }
     pub fn online(&self) -> BTreeMap<String, String> {
         self.online.lock().unwrap().clone()
     }
@@ -194,6 +261,9 @@ impl Node {
             for e in rd.flatten() {
                 match Proj::open(&e.path()) {
                     Ok(p) => {
+                        if let Some(e) = p.heal_head() {
+                            eprintln!("[kopanod] {}: saved state was incomplete ({e}); taking it from teammates again", p.project.id.short());
+                        }
                         projects.insert(p.project.id, Arc::new(p));
                     }
                     Err(err) => eprintln!("[kopanod] skipped {}: {err:#}", e.path().display()),
@@ -280,6 +350,7 @@ impl Node {
         let their: DeviceCert = serde_json::from_slice(&first)?;
         p.check_peer(&their, conn.remote_id().as_bytes())?;
         p.online.lock().unwrap().insert(device.to_string(), their.body.name.clone());
+        p.remember(&their);
         self.emit(json!({"event": "teammate", "project": p.project.id.hex(), "device": device, "name": their.body.name, "online": true}));
         let have: Vec<String> = p.head().into_iter().map(|h| h.hex()).collect();
         write_frame(&mut s, &serde_json::to_vec(&json!({"op": "watch", "have": have}))?).await?;
@@ -291,18 +362,19 @@ impl Node {
             let raw = note.get("raw").and_then(|n| n.as_u64()).unwrap_or(0);
             let outcome = {
                 let _w = p.write.lock().await;
+                let before = p.head();
                 let versions = kopano_core::wire::decode_compact(&p.store, &z, raw)?.versions;
                 for v in &versions {
                     project::verify_version(&p.store, &p.project, v)?;
                 }
-                self.integrate(p, h)?
+                self.integrate(p, h)?.map(|(what, c)| (what, c, p.photos_changed(before, p.head())))
             };
-            if let Some((what, conflicts)) = outcome {
+            if let Some((what, conflicts, photos)) = outcome {
                 if let Some(nh) = p.head() {
                     let _ = p.heads.send(nh);
                 }
                 self.emit(json!({"event": "synced", "project": p.project.id.hex(), "from": their.body.name, "head": p.head().map(|h| h.short()),
-                    "how": what, "clashes": conflicts, "bytes": z.len(), "apply_ms": t.elapsed().as_millis() as u64,
+                    "how": what, "clashes": conflicts, "photos": photos, "bytes": z.len(), "apply_ms": t.elapsed().as_millis() as u64,
                     "sent_ms": note.get("ms").and_then(|m| m.as_u64()), "now_ms": now_ms()}));
             }
         }
@@ -341,7 +413,7 @@ impl Node {
     pub async fn set(&self, p: &Proj, key: &str, field: &str, value: Value) -> Result<Option<Id>> {
         let v = {
             let _w = p.write.lock().await;
-            if p.binding != Binding::Toy {
+            if p.binding() != Binding::Toy {
                 bail!("this project lives in Light: edit it there");
             }
             let mut app = p.app()?;
@@ -365,7 +437,7 @@ impl Node {
     /// a version only if something changed (Repo::save compares with the head), then push it.
     /// Light has no change feed yet (05 phase 1), so this is a poll; 1 s keeps "live" honest.
     pub fn watch_app(self: &Arc<Self>, p: Arc<Proj>) {
-        if p.binding == Binding::Toy {
+        if p.binding() == Binding::Toy {
             return;
         }
         let node = self.clone();
@@ -379,21 +451,22 @@ impl Node {
                 }
                 let r = {
                     let _w = p.write.lock().await;
-                    (|| -> Result<Option<Id>> {
+                    (|| -> Result<Option<usize>> {
+                        let before = p.head();
                         let mut repo = p.repo(&node.device)?;
                         let v = p.with_app(|app| repo.save(app, "Edit in Light"))?;
                         if v.is_some() {
                             p.set_head(repo.head)?;
                         }
-                        Ok(v)
+                        Ok(v.map(|_| p.photos_changed(before, p.head())))
                     })()
                 };
                 match r {
-                    Ok(Some(_)) => {
+                    Ok(Some(photos)) => {
                         if let Some(h) = p.head() {
                             let _ = p.heads.send(h);
                         }
-                        node.emit(json!({"event": "saved", "project": p.project.id.hex(), "head": p.head().map(|h| h.short()), "now_ms": now_ms()}));
+                        node.emit(json!({"event": "saved", "project": p.project.id.hex(), "head": p.head().map(|h| h.short()), "photos": photos, "now_ms": now_ms()}));
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -592,6 +665,7 @@ impl Hub {
         }
         *member = true;
         write_frame(&mut send, &serde_json::to_vec(&self.node.device.cert)?).await?;
+        p.remember(&their);
         // a teammate who found us is one we watch back: one side adding the other is enough
         let dev = hex::encode(remote);
         if p.add_peer(&dev).unwrap_or(false) || !p.following.lock().unwrap().contains(&dev) {
@@ -748,10 +822,17 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
     let s = |k: &str| req.get(k).and_then(|v| v.as_str()).with_context(|| format!("{k} missing"));
     match s("op")? {
         "hello" => Ok(json!({"device": node.device.id(), "name": node.device.cert.body.name, "account": node.device.cert.body.account,
-            "projects": node.projects.read().unwrap().values().map(|p| json!({"id": p.project.id.hex(), "name": p.project.genesis.name})).collect::<Vec<_>>()})),
+            "signed_in": node.device.cert.body.expires_ms > now_ms(), "signed_in_until_ms": node.device.cert.body.expires_ms,
+            "projects": node.projects.read().unwrap().values().map(|p| json!({"id": p.project.id.hex(), "name": p.project.genesis.name, "app": p.binding()})).collect::<Vec<_>>()})),
         "status" => {
             let p = node.project(s("project")?)?;
-            Ok(json!({"head": p.head().map(|h| h.hex()), "items": p.app()?.photos.len(), "teammates": p.peers(), "online": p.online()}))
+            let (online, names) = (p.online(), p.names());
+            let teammates: Vec<Value> = p.peers().into_iter().map(|d| {
+                let n = names.get(&d).cloned().unwrap_or(Value::Null);
+                json!({"device": d, "name": n.get("name"), "account": n.get("account"), "online": online.contains_key(&d)})
+            }).collect();
+            let members: Vec<Value> = p.project.genesis.members.iter().map(|(a, m)| json!({"account": a, "role": m.role, "owner": *a == p.project.genesis.owner})).collect();
+            Ok(json!({"head": p.head().map(|h| h.hex()), "name": p.project.genesis.name, "app": p.binding(), "teammates": teammates, "online": online, "members": members}))
         }
         "get" => {
             let p = node.project(s("project")?)?;
@@ -774,8 +855,15 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
                 members.insert(acct.to_string(), project::Member { role, lanes });
             }
             let p = node.create_project(s("name")?, binding, members)?;
-            let n = p.with_app(|a| Ok(a.snapshot()?.len()))?;
-            Ok(json!({"project": p.project.id.hex(), "head": p.head().map(|h| h.hex()), "items": n}))
+            let snap = p.with_app(|a| a.snapshot())?;
+            let photos: BTreeSet<&str> = snap.keys().map(|k| k.rsplit_once('#').map(|(b, _)| b).unwrap_or(k)).collect();
+            Ok(json!({"project": p.project.id.hex(), "head": p.head().map(|h| h.hex()), "items": snap.len(), "photos": photos.len()}))
+        }
+        "attach" => {
+            let p = node.project(s("project")?)?;
+            let binding: Binding = serde_json::from_value(req.get("app").cloned().context("app")?)?;
+            p.rebind(binding)?;
+            Ok(json!("attached"))
         }
         "join" => {
             let binding: Binding = serde_json::from_value(req.get("app").cloned().unwrap_or(json!({"kind": "toy"})))?;
