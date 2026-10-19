@@ -107,7 +107,7 @@ impl Proj {
     }
     /// Run `f` against this project's app: the toy editor file, or Light (connected on first use
     /// and again after a dropped connection).
-    fn with_app<R>(&self, f: impl FnOnce(&mut dyn Connector) -> Result<R>) -> Result<R> {
+    fn with_app<R>(&self, dev: &Device, f: impl FnOnce(&mut dyn Connector) -> Result<R>) -> Result<R> {
         let binding = self.binding();
         tokio::task::block_in_place(|| match &binding {
             Binding::Toy => {
@@ -119,11 +119,13 @@ impl Proj {
             b => {
                 let mut g = self.light.lock().unwrap_or_else(|e| e.into_inner());
                 if g.is_none() {
-                    *g = Some(match b {
+                    let mut c = match b {
                         Binding::LightControl { port } => LightConnector::live(*port).context("Light is not running with its control port")?,
                         Binding::LightHeadless { cli } => LightConnector::headless(cli)?,
                         Binding::Toy => unreachable_toy()?,
-                    });
+                    };
+                    self.reconcile(dev, &mut c)?;
+                    *g = Some(c);
                 }
                 let r = f(g.as_mut().context("no app")?);
                 if r.is_err() {
@@ -132,6 +134,45 @@ impl Proj {
                 r
             }
         })
+    }
+    /// A window that (re)connects is brought to the project first; it never speaks first.
+    ///
+    /// S3b found the data loss this prevents: Light restarted as a fresh window, kopanod was
+    /// attached to it, and the next save read the fresh window's untouched photos as "the user
+    /// reset everything" and pushed that to the team, wiping everyone's edits. Whatever the window
+    /// held is not thrown away either: it is kept as its own version (in `kept.json`, off the
+    /// main line) so it can be restored by hand, and the project's head is applied into the app.
+    fn reconcile(&self, dev: &Device, app: &mut dyn Connector) -> Result<()> {
+        let Some(h) = self.head() else { return Ok(()) };
+        let root = project::load_version(&self.store, &h)?.tree()?;
+        let want = tree::entries(&self.store, root)?;
+        let have = app.snapshot()?;
+        let mut changes = Vec::new();
+        for (k, item) in &have {
+            let id = item.put(&self.store)?;
+            if want.get(k).is_some_and(|w| *w != id) {
+                changes.push((k.clone(), Some(id)));
+            }
+        }
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let n = changes.len();
+        let kept_root = tree::update(&self.store, root, changes)?;
+        let kept = project::commit(&self.store, &self.project, vec![h], kept_root, "Kept: this window's own state when it was linked again", &dev.cert, &dev.key)?;
+        self.store.flush()?;
+        let mut list: Vec<String> = std::fs::read(self.dir.join("kept.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        list.push(kept.hex());
+        kopano_core::store::write_atomic(&self.dir.join("kept.json"), &serde_json::to_vec(&list)?)?;
+        let info = app.info();
+        for (k, id) in &want {
+            let item = Item::get(&self.store, id)?;
+            if info.owns(&item.kind) && have.get(k) != Some(&item) {
+                app.apply(k, Some(&item))?;
+            }
+        }
+        eprintln!("[kopanod] {}: a window was linked again; brought it to the project ({n} item(s) differed, kept as {})", self.project.id.short(), kept.short());
+        Ok(())
     }
     pub fn binding(&self) -> Binding {
         self.binding.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -399,7 +440,7 @@ impl Node {
             }
         }
         let mut repo = p.repo(&self.device)?;
-        let r = p.with_app(|app| repo.integrate(app, &theirs))?;
+        let r = p.with_app(&self.device, |app| repo.integrate(app, &theirs))?;
         p.set_head(repo.head)?;
         p.store.flush()?;
         Ok(match r {
@@ -454,7 +495,7 @@ impl Node {
                     (|| -> Result<Option<usize>> {
                         let before = p.head();
                         let mut repo = p.repo(&node.device)?;
-                        let v = p.with_app(|app| repo.save(app, "Edit in Light"))?;
+                        let v = p.with_app(&node.device, |app| repo.save(app, "Edit in Light"))?;
                         if v.is_some() {
                             p.set_head(repo.head)?;
                         }
@@ -495,7 +536,7 @@ impl Node {
         let p = Arc::new(Proj::open(&dir)?);
         {
             let mut repo = p.repo(&self.device)?;
-            p.with_app(|app| repo.save(app, "Project started"))?;
+            p.with_app(&self.device, |app| repo.save(app, "Project started"))?;
             p.set_head(repo.head)?;
         }
         self.projects.write().unwrap().insert(pid, p.clone());
@@ -855,7 +896,7 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
                 members.insert(acct.to_string(), project::Member { role, lanes });
             }
             let p = node.create_project(s("name")?, binding, members)?;
-            let snap = p.with_app(|a| a.snapshot())?;
+            let snap = p.with_app(&node.device, |a| a.snapshot())?;
             let photos: BTreeSet<&str> = snap.keys().map(|k| k.rsplit_once('#').map(|(b, _)| b).unwrap_or(k)).collect();
             Ok(json!({"project": p.project.id.hex(), "head": p.head().map(|h| h.hex()), "items": snap.len(), "photos": photos.len()}))
         }
@@ -872,7 +913,7 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
         }
         "items" => {
             let p = node.project(s("project")?)?;
-            let snap = p.with_app(|a| a.snapshot())?;
+            let snap = p.with_app(&node.device, |a| a.snapshot())?;
             Ok(serde_json::to_value(snap.keys().collect::<Vec<_>>())?)
         }
         "add-teammate" => {
