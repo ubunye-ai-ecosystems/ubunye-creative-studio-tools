@@ -26,6 +26,8 @@ use kopano_core::project::{self, Item, Project};
 use kopano_core::repo::{Integrated, Repo};
 use kopano_core::store::{Id, ObjectStore, RedbStore};
 use kopano_core::tree;
+use kopano_core::connector::Connector;
+use kopano_lab::light::LightConnector;
 use kopano_lab::ToyEditor;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -69,6 +71,20 @@ pub struct Proj {
     pushed: std::sync::Mutex<HashMap<(Vec<Id>, Id), Arc<(u64, usize, Vec<u8>)>>>,
     following: std::sync::Mutex<HashSet<String>>,
     online: std::sync::Mutex<BTreeMap<String, String>>,
+    pub binding: Binding,
+    light: std::sync::Mutex<Option<LightConnector>>,
+}
+
+/// Which app holds this project's items on this device.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Binding {
+    /// the lab's toy editor in app.json (tests without a real app)
+    Toy,
+    /// the running Light desktop app (`lightcraft --control PORT`)
+    LightControl { port: u16 },
+    /// a headless Light engine with the demo library (automated tests)
+    LightHeadless { cli: String },
 }
 
 impl Proj {
@@ -85,6 +101,35 @@ impl Proj {
             pushed: Default::default(),
             following: Default::default(),
             online: Default::default(),
+            binding: std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy),
+            light: Default::default(),
+        })
+    }
+    /// Run `f` against this project's app: the toy editor file, or Light (connected on first use
+    /// and again after a dropped connection).
+    fn with_app<R>(&self, f: impl FnOnce(&mut dyn Connector) -> Result<R>) -> Result<R> {
+        tokio::task::block_in_place(|| match &self.binding {
+            Binding::Toy => {
+                let mut app = self.app()?;
+                let r = f(&mut app)?;
+                self.save_app(&app)?;
+                Ok(r)
+            }
+            b => {
+                let mut g = self.light.lock().unwrap_or_else(|e| e.into_inner());
+                if g.is_none() {
+                    *g = Some(match b {
+                        Binding::LightControl { port } => LightConnector::live(*port).context("Light is not running with its control port")?,
+                        Binding::LightHeadless { cli } => LightConnector::headless(cli)?,
+                        Binding::Toy => unreachable_toy()?,
+                    });
+                }
+                let r = f(g.as_mut().context("no app")?);
+                if r.is_err() {
+                    *g = None; // reconnect next time
+                }
+                r
+            }
         })
     }
     pub fn head(&self) -> Option<Id> {
@@ -164,6 +209,7 @@ impl Node {
     }
 
     fn emit(&self, v: Value) {
+        eprintln!("[kopanod] {v}");
         let _ = self.events.send(v);
     }
 
@@ -187,6 +233,7 @@ impl Node {
             for d in p.peers() {
                 self.follow(p.clone(), d);
             }
+            self.watch_app(p.clone());
         }
         Ok(router)
     }
@@ -279,10 +326,8 @@ impl Node {
                 }
             }
         }
-        let mut app = p.app()?;
         let mut repo = p.repo(&self.device)?;
-        let r = repo.integrate(&mut app, &theirs)?;
-        p.save_app(&app)?;
+        let r = p.with_app(|app| repo.integrate(app, &theirs))?;
         p.set_head(repo.head)?;
         p.store.flush()?;
         Ok(match r {
@@ -296,6 +341,9 @@ impl Node {
     pub async fn set(&self, p: &Proj, key: &str, field: &str, value: Value) -> Result<Option<Id>> {
         let v = {
             let _w = p.write.lock().await;
+            if p.binding != Binding::Toy {
+                bail!("this project lives in Light: edit it there");
+            }
             let mut app = p.app()?;
             let item = app.photos.get_mut(key).context("no such item")?;
             let ptr = format!("/{}", field.replace('.', "/"));
@@ -311,6 +359,119 @@ impl Node {
         }
         self.emit(json!({"event": "saved", "project": p.project.id.hex(), "head": p.head().map(|h| h.short()), "now_ms": now_ms()}));
         Ok(v)
+    }
+
+    /// S3: notice edits made in the app itself. Every second, ask the app for its items and save
+    /// a version only if something changed (Repo::save compares with the head), then push it.
+    /// Light has no change feed yet (05 phase 1), so this is a poll; 1 s keeps "live" honest.
+    pub fn watch_app(self: &Arc<Self>, p: Arc<Proj>) {
+        if p.binding == Binding::Toy {
+            return;
+        }
+        let node = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                // a device that just joined must take the project's versions first: saving its
+                // own app state before that would start a second history and force a merge
+                if p.head().is_none() {
+                    continue;
+                }
+                let r = {
+                    let _w = p.write.lock().await;
+                    (|| -> Result<Option<Id>> {
+                        let mut repo = p.repo(&node.device)?;
+                        let v = p.with_app(|app| repo.save(app, "Edit in Light"))?;
+                        if v.is_some() {
+                            p.set_head(repo.head)?;
+                        }
+                        Ok(v)
+                    })()
+                };
+                match r {
+                    Ok(Some(_)) => {
+                        if let Some(h) = p.head() {
+                            let _ = p.heads.send(h);
+                        }
+                        node.emit(json!({"event": "saved", "project": p.project.id.hex(), "head": p.head().map(|h| h.short()), "now_ms": now_ms()}));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        node.emit(json!({"event": "app", "project": p.project.id.hex(), "error": format!("{e:#}")}));
+                        tokio::time::sleep(Duration::from_secs(4)).await;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Start a project from what the app has now. `members`: account -> role and lanes.
+    pub fn create_project(self: &Arc<Self>, name: &str, binding: Binding, members: BTreeMap<String, project::Member>) -> Result<Arc<Proj>> {
+        let tmp = self.device.home.join("projects").join(format!("new-{}", hex::encode(rand::random::<[u8; 4]>())));
+        std::fs::create_dir_all(&tmp)?;
+        let pid = {
+            let store = RedbStore::open(tmp.join("kopano.redb"))?;
+            let pr = Project::create(&store, name, vec![self.device.cert.signer.clone()], &self.device.cert, &self.device.key, members)?;
+            pr.id
+        };
+        std::fs::write(tmp.join("project"), pid.hex())?;
+        std::fs::write(tmp.join("binding.json"), serde_json::to_vec(&binding)?)?;
+        std::fs::write(tmp.join("app.json"), b"{}")?;
+        let dir = self.device.home.join("projects").join(&pid.hex()[..8]);
+        std::fs::rename(&tmp, &dir)?;
+        let p = Arc::new(Proj::open(&dir)?);
+        {
+            let mut repo = p.repo(&self.device)?;
+            p.with_app(|app| repo.save(app, "Project started"))?;
+            p.set_head(repo.head)?;
+        }
+        self.projects.write().unwrap().insert(pid, p.clone());
+        self.watch_app(p.clone());
+        Ok(p)
+    }
+
+    /// Join a project a teammate shared: fetch its signed genesis from them, check it, then watch
+    /// them (the first push brings every version, and the app receives every item).
+    pub async fn join(self: &Arc<Self>, pid: &str, from: &str, binding: Binding) -> Result<Arc<Proj>> {
+        let id = Id::parse(pid)?;
+        if let Ok(p) = self.project(pid) {
+            return Ok(p);
+        }
+        let ep = self.endpoint.get().context("not started")?.clone();
+        let eid = iroh::EndpointId::from_bytes(&hex::decode(from)?.try_into().map_err(|_| anyhow!("bad device id"))?)?;
+        let conn = tokio::time::timeout(Duration::from_secs(30), ep.connect(EndpointAddr::from(eid), ALPN)).await.map_err(|_| anyhow!("that teammate is not reachable"))??;
+        let (mut s, mut r) = conn.open_bi().await?;
+        write_frame(&mut s, &serde_json::to_vec(&self.device.cert)?).await?;
+        write_frame(&mut s, pid.as_bytes()).await?;
+        let first = read_frame(&mut r).await?;
+        if first.starts_with(b"refused") {
+            bail!("{}", String::from_utf8_lossy(&first));
+        }
+        write_frame(&mut s, &serde_json::to_vec(&json!({"op": "genesis"}))?).await?;
+        let g = read_frame(&mut r).await?;
+        conn.close(0u32.into(), b"joined");
+        let dir = self.device.home.join("projects").join(&pid[..8]);
+        std::fs::create_dir_all(&dir)?;
+        {
+            let store = RedbStore::open(dir.join("kopano.redb"))?;
+            store.put_verified(&id, &g)?;
+            store.flush()?;
+            let pr = Project::load(&store, &id)?;
+            let their: DeviceCert = serde_json::from_slice(&first)?;
+            their.check(&pr.genesis.providers, now_ms())?;
+            if their.body.device != from {
+                bail!("the teammate's certificate is for another device");
+            }
+        }
+        std::fs::write(dir.join("project"), pid)?;
+        std::fs::write(dir.join("binding.json"), serde_json::to_vec(&binding)?)?;
+        std::fs::write(dir.join("app.json"), b"{}")?;
+        let p = Arc::new(Proj::open(&dir)?);
+        p.add_peer(from)?;
+        self.projects.write().unwrap().insert(id, p.clone());
+        self.follow(p.clone(), from.to_string());
+        self.watch_app(p.clone());
+        Ok(p)
     }
 
     pub fn add_teammate(self: &Arc<Self>, p: Arc<Proj>, device: &str) -> Result<()> {
@@ -473,6 +634,9 @@ impl Hub {
                     }
                     break;
                 }
+                Some("genesis") => {
+                    write_frame(&mut send, &p.store.get(&p.project.id)?).await?;
+                }
                 Some("heads") => {
                     let heads: Vec<String> = p.head().into_iter().map(|h| h.hex()).collect();
                     write_frame(&mut send, &serde_json::to_vec(&json!({"heads": heads}))?).await?;
@@ -600,6 +764,29 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
             let v = node.set(&p, s("key")?, s("field")?, req.get("value").cloned().unwrap_or(Value::Null)).await?;
             Ok(json!({"version": v.map(|v| v.short()), "ms": now_ms()}))
         }
+        "create-project" => {
+            let binding: Binding = serde_json::from_value(req.get("app").cloned().unwrap_or(json!({"kind": "toy"})))?;
+            let mut members = BTreeMap::new();
+            for m in req.get("members").and_then(|m| m.as_array()).into_iter().flatten() {
+                let acct = m.get("account").and_then(|a| a.as_str()).context("member account")?;
+                let role: project::Role = serde_json::from_value(m.get("role").cloned().unwrap_or(json!("editor")))?;
+                let lanes: Vec<String> = serde_json::from_value(m.get("lanes").cloned().unwrap_or(json!([])))?;
+                members.insert(acct.to_string(), project::Member { role, lanes });
+            }
+            let p = node.create_project(s("name")?, binding, members)?;
+            let n = p.with_app(|a| Ok(a.snapshot()?.len()))?;
+            Ok(json!({"project": p.project.id.hex(), "head": p.head().map(|h| h.hex()), "items": n}))
+        }
+        "join" => {
+            let binding: Binding = serde_json::from_value(req.get("app").cloned().unwrap_or(json!({"kind": "toy"})))?;
+            let p = node.join(s("project")?, s("from")?, binding).await?;
+            Ok(json!({"project": p.project.id.hex()}))
+        }
+        "items" => {
+            let p = node.project(s("project")?)?;
+            let snap = p.with_app(|a| a.snapshot())?;
+            Ok(serde_json::to_value(snap.keys().collect::<Vec<_>>())?)
+        }
         "add-teammate" => {
             let p = node.project(s("project")?)?;
             node.add_teammate(p, s("device")?)?;
@@ -610,6 +797,10 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
 }
 
 /// The token apps must show. Created once, readable by this user only (a file next to the key).
+fn unreachable_toy() -> Result<LightConnector> {
+    bail!("toy binding has no Light connection")
+}
+
 pub fn api_token(home: &Path) -> Result<String> {
     let f = home.join("api.token");
     if let Ok(t) = std::fs::read_to_string(&f) {
