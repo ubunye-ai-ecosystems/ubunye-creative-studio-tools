@@ -472,6 +472,38 @@ async fn serve(dir: &Path, relay_only: bool) -> Result<()> {
     Ok(())
 }
 
+/// E39: what this network allows, so a failed direct path can be explained instead of guessed.
+/// UDP out at all, the public address the relays see, whether it changes per destination (then
+/// hole punching mostly fails: carrier-grade NAT or a strict router), IPv6, and the local
+/// addresses. A throwaway key: nothing about the device or project is used.
+async fn netcheck() -> Result<()> {
+    use iroh::Watcher;
+    let ep = Endpoint::builder(presets::N0).bind().await?;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ep.online()).await;
+    let mut rep = ep.net_report();
+    let end = Instant::now() + std::time::Duration::from_secs(8);
+    while rep.get().is_none() && Instant::now() < end {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let r = rep.get();
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "netcheck",
+            "udp_v4": r.as_ref().map(|r| r.udp_v4), "udp_v6": r.as_ref().map(|r| r.udp_v6),
+            "public_v4": r.as_ref().and_then(|r| r.global_v4).map(|a| a.to_string()),
+            "public_v6": r.as_ref().and_then(|r| r.global_v6).map(|a| a.to_string()),
+            "port_changes_per_destination_v4": r.as_ref().and_then(|r| r.mapping_varies_by_dest_ipv4),
+            "port_changes_per_destination_v6": r.as_ref().and_then(|r| r.mapping_varies_by_dest_ipv6),
+            "preferred_relay": r.as_ref().and_then(|r| r.preferred_relay.clone()).map(|u| u.to_string()),
+            "captive_portal": r.as_ref().and_then(|r| r.captive_portal),
+            "addrs": ep.addr().addrs.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+        })
+    );
+    ep.close().await;
+    Ok(())
+}
+
 // ---- client side ------------------------------------------------------------------------------
 
 async fn connect(peer: &Peer, from: &Path, relay_only: bool, alpn: &[u8]) -> Result<(Endpoint, Connection, u128, String)> {
@@ -1480,6 +1512,7 @@ async fn main() -> Result<()> {
         )
         .await,
         "serve" => serve(&need_dir()?, relay_only).await,
+        "netcheck" => netcheck().await,
         "pull" => pull(&need_dir()?, Path::new(&arg(&args, "--from").context("--from")?), relay_only, args.iter().any(|a| a == "--closure"), args.iter().any(|a| a == "--compact")).await,
         "fetch-ranges" => {
             let ranges: Vec<(u64, u64)> = arg(&args, "--ranges").context("--ranges a-b,c-d")?.split(',').map(|r| {
