@@ -16,6 +16,7 @@
 
 #[path = "../../kopano-lab/src/keystore.rs"]
 pub mod keystore;
+pub mod unlinked;
 
 use anyhow::{anyhow, bail, Context, Result};
 use iroh::endpoint::{presets, Connection};
@@ -821,8 +822,13 @@ fn compact_payload(p: &Proj, have: &[Id]) -> Result<(u64, usize, Vec<u8>)> {
 // ---- local API for apps: one JSON request per line on 127.0.0.1, token required --------------
 
 pub async fn serve_api(node: Arc<Node>, port: u16) -> Result<()> {
+    serve_api_on(node, tokio::net::TcpListener::bind(("127.0.0.1", port)).await?).await
+}
+
+/// The API on a port already bound (kopanod binds it before going online, so a second kopanod
+/// for this computer stops there instead of running the same identity twice).
+pub async fn serve_api_on(node: Arc<Node>, l: tokio::net::TcpListener) -> Result<()> {
     let token = api_token(&node.device.home)?;
-    let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     loop {
         let (c, _) = l.accept().await?;
         let (node, token) = (node.clone(), token.clone());
