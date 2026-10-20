@@ -214,6 +214,75 @@ fn still_declined(p: &Proj, tip: &Id, declined: &Id, main: &Id) -> bool {
     project::history(&p.store, &[*tip]).is_ok_and(|h| h.iter().filter(|(id, _)| !known.contains(id)).all(|(_, v)| v.parents().is_ok_and(|ps| ps.len() == 2)))
 }
 
+/// `v` brings nothing main does not have: it is in main, or merging it into main changes nothing
+/// (S8: after two approvers approved at once, catch-up merges in a member's branch held only what
+/// main got by another way, and were offered for review as "changed 0 photos").
+fn adds_nothing(p: &Proj, v: &Id, main: &Id) -> bool {
+    if is_anc(p, v, main) {
+        return true;
+    }
+    (|| -> Result<bool> {
+        let base = project::common_ancestor(&p.store, main, v)?;
+        let mt = tree_of(p, Some(*main))?;
+        let out = kopano_core::merge::merge_trees(&p.store, tree_of(p, base)?, mt, tree_of(p, Some(*v))?, &|k: &str| mergeable(k))?;
+        Ok(out.conflicts.is_empty() && tree::diff(&p.store, mt, out.root)?.is_empty())
+    })()
+    .unwrap_or(false)
+}
+
+/// Every version `account` made itself (not a merge) under `b` is in `main`.
+fn own_edits_in(p: &Proj, b: &Id, main: &Id, account: &str) -> bool {
+    let (Ok(hb), Ok(hm)) = (project::history(&p.store, &[*b]), project::history(&p.store, &[*main])) else { return false };
+    let in_main: BTreeSet<Id> = hm.into_iter().map(|(id, _)| id).collect();
+    hb.iter().filter(|(_, v)| v.cert.body.account == account && v.parents().is_ok_and(|ps| ps.len() < 2)).all(|(id, _)| in_main.contains(id))
+}
+
+/// Whose work a version is: for an approval (a merge into main), the person whose version was
+/// approved; otherwise its signer.
+fn author_of(p: &Proj, v: &Id) -> String {
+    let Ok(ver) = project::load_version(&p.store, v) else { return String::new() };
+    match ver.parents().ok().as_deref() {
+        Some([_, theirs]) => project::load_version(&p.store, theirs).map(|t| t.cert.body.account.clone()).unwrap_or_else(|_| ver.cert.body.account.clone()),
+        _ => ver.cert.body.account.clone(),
+    }
+}
+
+/// Two approvers approved at the same moment and this device's main update lost (`wf::tips` keeps
+/// one): the approval was already decided here, so it is applied again on top of the main that
+/// won, when that needs no new decision. A clash between the two leaves it offered again.
+/// Returns true when main moved. Call under `p.write`.
+fn reapply_lost(node: &Node, p: &Proj) -> Result<bool> {
+    let (t, forks) = tips(p)?;
+    let Some((main_id, main_u)) = t.get(MAIN).cloned() else { return Ok(false) };
+    let mut main = Id::parse(&main_u.version)?;
+    let m = members(p)?;
+    if !m.is_approver(&node.device.cert.body.account) || !m.device_ok(&node.device.cert) {
+        return Ok(false);
+    }
+    let mine: Vec<Id> = forks.iter().filter(|f| p.store.has(f) && project::load_version(&p.store, f).is_ok_and(|v| v.cert.body.device == node.device.cert.body.device)).copied().collect();
+    let (mut prev, mut moved) = ((main_id, main_u.seq), false);
+    for f in mine {
+        if adds_nothing(p, &f, &main) {
+            continue;
+        }
+        let base = project::common_ancestor(&p.store, &main, &f)?;
+        let out = kopano_core::merge::merge_trees(&p.store, tree_of(p, base)?, tree_of(p, Some(main))?, tree_of(p, Some(f))?, &|k: &str| mergeable(k))?;
+        if !out.conflicts.is_empty() {
+            continue; // a new decision: it stays offered again
+        }
+        let (nv, _) = wf::approve_with(&p.store, &p.project, &main, &f, &|_: &str| true, &|k: &str| mergeable(k), &node.device.cert, &node.device.key)?;
+        let seen = wf::member_tips(&p.store, &p.review.members());
+        let id = wf::update_ref(&p.store, &p.project, MAIN, &nv, Some(prev), &seen, &node.device.cert, &node.device.key)?;
+        p.store.flush()?;
+        learn(p, &[id], &[])?;
+        eprintln!("[kopanod] {}: an approval made here crossed another approver's; applied it again on the main that won ({})", p.project.id.short(), nv.short());
+        prev = (id, prev.1 + 1);
+        main = nv;
+        moved = true;
+    }
+    Ok(moved)
+}
+
 /// The ref this device's edits go to: main for the owner, the account's branch for anyone else.
 pub fn my_ref(node: &Node, p: &Proj) -> String {
     let me = &node.device.cert.body.account;
@@ -237,8 +306,17 @@ pub fn sign_mine(node: &Node, p: &Proj) -> Result<bool> {
         if !members(p)?.device_ok(&node.device.cert) {
             bail!("you are no longer on this project");
         }
-        if version_of(&t, MAIN).is_some_and(|m| is_anc(p, &head, &m)) {
-            return Ok(false);
+        if let Some(m) = version_of(&t, MAIN) {
+            if is_anc(p, &head, &m) {
+                return Ok(false);
+            }
+            // the window holds exactly main and his branch offers nothing more (his work came
+            // into main by another way): show main. A branch that still offers something (he
+            // undid it in the window) is signed as usual, so the undone work is not approved.
+            if tree_of(p, Some(head))? == tree_of(p, Some(m))? && version_of(&t, &name).map_or(true, |b| adds_nothing(p, &b, &m)) {
+                p.set_head(Some(m))?;
+                return Ok(false);
+            }
         }
     }
     if version_of(&t, &name) == Some(head) {
@@ -282,6 +360,7 @@ pub fn refresh(node: &Node, p: &Proj) -> Result<Option<(&'static str, usize)>> {
     if p.review.viewing().is_some() {
         return Ok(None); // the owner is looking at a member's version: wait until that ends
     }
+    let reapplied = reapply_lost(node, p)?;
     let (t, _) = tips(p)?;
     let Some(main) = version_of(&t, MAIN) else { return Ok(None) };
     let mut wants = vec![];
@@ -311,6 +390,9 @@ pub fn refresh(node: &Node, p: &Proj) -> Result<Option<(&'static str, usize)>> {
     }
     if sign_mine(node, p)? && out.is_none() {
         out = Some(("saved an edit made meanwhile", 0));
+    }
+    if reapplied && out.is_none() {
+        out = Some(("approved again", 0));
     }
     Ok(out)
 }
@@ -541,7 +623,7 @@ pub fn review(node: &Node, p: &Proj) -> Result<Value> {
         for (name, (_, u)) in &t {
             let Some(acct) = name.strip_prefix("branch/") else { continue };
             let Ok(v) = Id::parse(&u.version) else { continue };
-            if is_anc(p, &v, &main) {
+            if adds_nothing(p, &v, &main) {
                 continue;
             }
             if version_of(&t, &wf::review_of(acct)).is_some_and(|d| still_declined(p, &v, &d, &main)) {
@@ -551,8 +633,12 @@ pub fn review(node: &Node, p: &Proj) -> Result<Value> {
             pending.push(pending_entry(node, p, acct, &v, &main)?);
         }
         // two approvers at once: the version that lost is offered again
-        for f in forks.iter().filter(|f| p.store.has(f) && !is_anc(p, f, &main)) {
-            let acct = project::load_version(&p.store, f).map(|v| v.cert.body.account.clone()).unwrap_or_default();
+        for f in forks.iter().filter(|f| p.store.has(f) && !adds_nothing(p, f, &main)) {
+            let acct = author_of(p, f);
+            // the same work still waits on its own branch: listed there already
+            if version_of(&t, &wf::branch_of(&acct)).is_some_and(|b| !adds_nothing(p, &b, &main) && project::load_version(&p.store, f).ok().and_then(|v| v.parents().ok()).is_some_and(|ps| ps.last().is_some_and(|x| is_anc(p, x, &b)))) {
+                continue;
+            }
             let mut e = pending_entry(node, p, &acct, f, &main)?;
             e["again"] = json!(true);
             pending.push(e);
@@ -562,9 +648,19 @@ pub fn review(node: &Node, p: &Proj) -> Result<Value> {
         Value::Null
     } else {
         let b = version_of(&t, &wf::branch_of(&me));
+        let me = me.as_str();
         let state = match (b, main) {
             (None, _) => "none",
             (Some(b), Some(mv)) if is_anc(p, &b, &mv) => "approved",
+            // his own edits are all in main (approved, by way of another approval): approved;
+            // an edit of his that main lacks but adds nothing (he undid it) waits for nobody
+            (Some(b), Some(mv)) if adds_nothing(p, &b, &mv) => {
+                if own_edits_in(p, &b, &mv, &me) {
+                    "approved"
+                } else {
+                    "none"
+                }
+            }
             (Some(b), Some(mv)) if version_of(&t, &wf::review_of(&me)).is_some_and(|d| still_declined(p, &b, &d, &mv)) => "declined",
             (Some(_), _) => "waiting",
         };
@@ -1339,6 +1435,58 @@ mod tests {
         }
         assert_eq!(t.main(0), main0, "main did not move");
         assert_eq!(t.review(0)["pending"].as_array().unwrap().len(), 1, "still waiting for her");
+        Ok(())
+    }
+
+    /// S8: two approvers move main at the same moment. The update that loses is applied again by
+    /// the device that made it (no new decision needed), so both count; nothing is offered again,
+    /// nothing waits as "changed 0 photos", every window ends on one main.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crossing_approvals_both_count() -> Result<()> {
+        let t = team("cross").await?;
+        set_approver(&t.nodes[0], &t.p(0), "acct-m1", true).await?;
+        t.both().await?;
+        // the same work, approved on both devices before either hears of the other
+        t.set(1, "photo-0001", "develop.exposure", 0.8).await?;
+        t.both().await?;
+        approve(&t.nodes[0], &t.p(0), "acct-m1", None, None, &Map::new()).await?;
+        approve(&t.nodes[1], &t.p(1), "acct-m1", None, None, &Map::new()).await?;
+        for _ in 0..3 {
+            t.both().await?;
+        }
+        assert_eq!(t.main(0), t.main(1), "one main");
+        assert_eq!(t.get(0, "photo-0001", "develop.exposure"), 0.8);
+        assert_eq!(t.get(1, "photo-0001", "develop.exposure"), 0.8);
+        assert_eq!(t.review(0)["pending"].as_array().unwrap().len(), 0, "{}", t.review(0));
+        assert_eq!(t.review(1)["pending"].as_array().unwrap().len(), 0, "{}", t.review(1));
+        assert_eq!(t.review(1)["mine"]["state"], "approved");
+        // different work: the owner edits main while Member1 (an approver) approves his own work
+        t.set(1, "photo-0002", "rating", 4.0).await?;
+        t.set(0, "photo-0000", "develop.contrast", 22.0).await?;
+        approve(&t.nodes[1], &t.p(1), "acct-m1", None, None, &Map::new()).await?;
+        for _ in 0..3 {
+            t.both().await?;
+        }
+        assert_eq!(t.main(0), t.main(1), "one main after the fork");
+        for i in 0..2 {
+            assert_eq!(t.get(i, "photo-0002", "rating"), 4.0, "his approval counts on {i}");
+            assert_eq!(t.get(i, "photo-0000", "develop.contrast"), 22.0, "her edit counts on {i}");
+            assert!(t.review(i)["pending"].as_array().unwrap().is_empty(), "{}", t.review(i));
+            assert_eq!(t.p(i).head(), t.main(i), "window {i} shows main");
+        }
+        assert_eq!(t.review(1)["mine"]["state"], "approved");
+        Ok(())
+    }
+
+    /// A member undoes his change in the window: his branch must not keep offering the undone work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_undone_change_is_not_offered() -> Result<()> {
+        let t = team("undo").await?;
+        t.set(1, "photo-0001", "develop.exposure", 0.8).await?;
+        t.set(1, "photo-0001", "develop.exposure", 0.0).await?;
+        t.both().await?;
+        assert!(t.review(0)["pending"].as_array().unwrap().is_empty(), "{}", t.review(0));
+        assert_eq!(t.review(1)["mine"]["state"], "none");
         Ok(())
     }
 
