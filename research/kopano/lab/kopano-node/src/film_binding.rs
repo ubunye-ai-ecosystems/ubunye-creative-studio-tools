@@ -97,8 +97,8 @@ fn save_state(p: &Proj, s: &State) -> Result<()> {
 /// A Film window kopanod is linked to.
 pub struct Slot {
     pub conn: FilmConnector,
-    /// items the window refused or could not take yet: key -> what the project wants there
-    pub deferred: BTreeMap<String, Option<Item>>,
+    /// items the window refused or could not take yet
+    pub deferred: BTreeMap<String, Deferred>,
     /// the id block this window was given
     pub block: Option<u64>,
     /// not brought to the project yet
@@ -110,6 +110,15 @@ pub struct Slot {
     pub waiting_said: bool,
     /// the window has a project file to save to (Film's desktop app only)
     pub control: bool,
+}
+
+/// An update the window refused or could not take yet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Deferred {
+    /// what the window held under this key when the update was refused
+    pub window: Option<Item>,
+    /// what the project wants there
+    pub want: Option<Item>,
 }
 
 /// The id block `n` of this device for this project.
@@ -300,23 +309,32 @@ pub struct View<'a, A: FilmApp + ?Sized> {
     store: &'a RedbStore,
     head: Option<Id>,
     pub app: &'a mut A,
-    pub deferred: &'a mut BTreeMap<String, Option<Item>>,
+    pub deferred: &'a mut BTreeMap<String, Deferred>,
     pub joining: bool,
     /// the block this window was given: a snapshot from another block is another project file
     pub expect_block: Option<u64>,
     /// updates the window took
     pub applied: usize,
+    /// the window's own items at the last snapshot (what a refused update leaves there)
+    seen: Option<BTreeMap<String, Item>>,
 }
 
 impl<'a, A: FilmApp + ?Sized> View<'a, A> {
-    pub fn new(store: &'a RedbStore, head: Option<Id>, app: &'a mut A, deferred: &'a mut BTreeMap<String, Option<Item>>) -> Self {
-        Self { store, head, app, deferred, joining: false, expect_block: None, applied: 0 }
+    pub fn new(store: &'a RedbStore, head: Option<Id>, app: &'a mut A, deferred: &'a mut BTreeMap<String, Deferred>) -> Self {
+        Self { store, head, app, deferred, joining: false, expect_block: None, applied: 0, seen: None }
     }
-    /// Try every waiting update again. Returns how many the window took.
+    /// Try every waiting update again. Returns how many the window took. Called right after a
+    /// save (which kept any edit the user made to a waiting item, see `snapshot`), so what the
+    /// window shows now is the new reference for an update it refuses again: footage that came
+    /// meanwhile changes how a clip reads, and that is not an edit by the user.
     pub fn retry(&mut self) -> usize {
         let before = self.applied;
-        for (k, item) in self.deferred.clone() {
-            let _ = self.apply(&k, item.as_ref());
+        let Ok(now) = self.app.snapshot() else { return 0 };
+        for (k, d) in self.deferred.clone() {
+            let _ = self.apply(&k, d.want.as_ref());
+            if let Some(still) = self.deferred.get_mut(&k) {
+                still.window = now.get(&k).cloned();
+            }
         }
         self.applied - before
     }
@@ -349,7 +367,8 @@ impl<A: FilmApp + ?Sized> Connector for View<'_, A> {
             }
             return Ok(s);
         }
-        let mut s = self.app.snapshot()?;
+        let raw = self.app.snapshot()?;
+        let mut s = raw.clone();
         if let (Some(want), Some(now)) = (self.expect_block, self.app.block()) {
             if want != now {
                 bail!("the Film window opened another project file; it is linked again before anything it shows is saved");
@@ -371,12 +390,18 @@ impl<A: FilmApp + ?Sized> Connector for View<'_, A> {
                 }
             }
         }
-        for (k, v) in self.deferred.iter() {
-            match v {
+        // A waiting update is the project's item, until the user edits that item in the window
+        // themselves: their edit is the later one and wins (as for a Photo tile waiting for its
+        // pixels). Without this the edit was hidden behind the waiting update and then undone by
+        // the next retry, never saved.
+        self.deferred.retain(|k, d| raw.get(k) == d.window.as_ref());
+        for (k, d) in self.deferred.iter() {
+            match &d.want {
                 Some(it) => s.insert(k.clone(), it.clone()),
                 None => s.remove(k),
             };
         }
+        self.seen = Some(raw);
         Ok(s)
     }
     fn apply(&mut self, key: &str, item: Option<&Item>) -> Result<()> {
@@ -386,7 +411,14 @@ impl<A: FilmApp + ?Sized> Connector for View<'_, A> {
                 self.applied += 1;
             }
             Err(e) => {
-                if self.deferred.insert(key.to_string(), item.cloned()).is_none() {
+                let window = match self.deferred.get(key) {
+                    Some(d) => d.window.clone(),
+                    None => match &self.seen {
+                        Some(s) => s.get(key).cloned(),
+                        None => self.app.snapshot()?.get(key).cloned(),
+                    },
+                };
+                if self.deferred.insert(key.to_string(), Deferred { window, want: item.cloned() }).is_none() {
                     eprintln!("[kopanod] Film did not take {key} yet ({e:#}); it waits and is tried again");
                 }
             }
@@ -1070,6 +1102,30 @@ mod tests {
         assert_eq!(v.retry(), 1);
         assert!(v.deferred.is_empty());
         assert_eq!(v.app.items.get("film/1/clip/7#grade"), Some(&grade(0.5)));
+        Ok(())
+    }
+
+    /// The user grades a clip whose team grade the window refused: the user's grade is the later
+    /// edit and is saved. Before, the waiting update hid it from every save and the next retry
+    /// put the team's grade over it, so it was never saved anywhere.
+    #[test]
+    fn a_user_edit_on_a_waiting_update_wins() -> Result<()> {
+        let t = team("waiting-user")?;
+        let h = commit(&t, &[("film/1/clip/7#edit", clip("b3-a", 100)), ("film/1/clip/7#grade", grade(0.1))])?;
+        let mut app = Fake { items: BTreeMap::from([("film/1/clip/7#edit".into(), clip("b3-a", 100)), ("film/1/clip/7#grade".into(), grade(0.1))]), media: BTreeSet::from(["b3-a".into()]), refuse: BTreeSet::from(["film/1/clip/7#grade".into()]), blk: None };
+        let mut deferred = BTreeMap::new();
+        let mut v = View::new(&t.store, Some(h), &mut app, &mut deferred);
+        v.snapshot()?;
+        v.apply("film/1/clip/7#grade", Some(&grade(0.5)))?;
+        assert_eq!(v.deferred["film/1/clip/7#grade"].window, Some(grade(0.1)));
+        // the user moves the grade in the window
+        v.app.items.insert("film/1/clip/7#grade".into(), grade(0.9));
+        let nv = repo(&t, Some(h)).save(&mut v, "Edit in Film")?.expect("the user's grade is saved");
+        assert_eq!(Item::get(&t.store, &tree::get(&t.store, project::load_version(&t.store, &nv)?.tree()?, "film/1/clip/7#grade")?.unwrap())?, grade(0.9));
+        assert!(v.deferred.is_empty());
+        v.app.refuse.clear();
+        assert_eq!(v.retry(), 0);
+        assert_eq!(v.app.items["film/1/clip/7#grade"], grade(0.9));
         Ok(())
     }
 
