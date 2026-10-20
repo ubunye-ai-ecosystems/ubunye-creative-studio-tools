@@ -377,3 +377,105 @@ def moved_kb(k):
             except Exception:
                 pass
     return n
+
+
+# ---- Film ----------------------------------------------------------------------------------------
+
+TPS = 254_016_000_000  # Film ticks per second
+
+
+class Film:
+    """One Ubunye Film window (control channel)."""
+
+    def __init__(self, run, who, exe, port):
+        self.run, self.who, self.exe, self.port = run, who, exe, port
+        self.p, self.n = None, 0
+
+    def start(self, tag=''):
+        data = f'{self.run.W}/film-data-{self.who}'
+        os.makedirs(data, exist_ok=True)
+        log = open(f'{self.run.W}/film-{self.who}{tag}.log', 'w')
+        self.p = subprocess.Popen([self.exe, '--control', str(self.port), '--empty', '--no-recover', '--data-dir', data], stdout=log, stderr=log)
+        self.run.procs.append(self.p)
+        end = time.time() + 120
+        while True:
+            try:
+                self.s = socket.create_connection(('127.0.0.1', self.port), timeout=300)
+                break
+            except OSError:
+                if time.time() > end:
+                    raise
+                time.sleep(0.3)
+        self.f = self.s.makefile('r')
+        return self
+
+    def rpc(self, method, params=None):
+        self.n += 1
+        self.s.sendall((json.dumps({'id': self.n, 'method': method, 'params': params or {}}) + '\n').encode())
+        r = json.loads(self.f.readline())
+        if not r.get('ok'):
+            raise RuntimeError(f'{method}: {r.get("error")}')
+        return r.get('result')
+
+    def cmd(self, command, **params):
+        return self.rpc('engine.execute', {'command': command, 'params': params})
+
+    def dismiss_link_dialog(self):
+        """Film asks where missing footage is when a file opens; the footage is on its way: Esc."""
+        time.sleep(1.5)
+        for _ in range(2):
+            try:
+                self.rpc('ui.key', {'key': 'Escape'})
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+    def seq(self):
+        return self.cmd('kopano.items')['sequences'][0]
+
+    def clip(self, kind, i=0):
+        return sorted([c for c in self.seq()['clips'] if c['kind'] == kind], key=lambda c: c['edit']['cut'][0])[i]
+
+    def find(self, cid):
+        return next((c for c in self.seq()['clips'] if c['id'] == cid), None)
+
+    def ids(self):
+        return sorted(c['id'] for c in self.seq()['clips'])
+
+    def snap(self):
+        s = self.seq()
+        return json.dumps({'clips': sorted(s['clips'], key=lambda c: c['id']), 'tracks': sorted(s['tracks'], key=lambda t: t['id'])}, sort_keys=True)
+
+    def shot(self, tag):
+        path = os.path.abspath(f'{self.run.shots}/{tag}-{self.who}.png')
+        os.makedirs(self.run.shots, exist_ok=True)
+        try:
+            for _ in range(2):  # let decoders catch up on the frame under the playhead
+                time.sleep(1.2)
+                self.rpc('ui.screenshot', {})
+            self.rpc('ui.screenshot', {'path': path})
+            return path
+        except Exception as e:
+            self.run.res.setdefault('screenshot_errors', []).append(f'{self.who} {tag}: {e}')
+
+    def quit(self):
+        try:
+            self.s.close()
+        except Exception:
+            pass
+        if self.p:
+            self.p.terminate()
+            self.p.wait(20)
+
+
+def exposure(c):
+    return ((c or {}).get('grade') or {}).get('fx', {}).get('lumetri', {}).get('params', {}).get('exposure', {}).get('value', {}).get('Float')
+
+
+def gain(c):
+    return ((c or {}).get('sound') or {}).get('gain_db')
+
+
+def file_hash(p):
+    import hashlib
+    return hashlib.blake2b(open(p, 'rb').read(), digest_size=16).hexdigest()

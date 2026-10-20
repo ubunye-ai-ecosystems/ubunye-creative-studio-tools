@@ -214,7 +214,8 @@ pub fn with_slot<R>(p: &Proj, dev: &Device, f: impl FnOnce(&mut Slot, Option<Id>
                 if let Some(h) = head {
                     let mut v = View::new(&p.store, Some(h), &mut slot.conn, &mut slot.deferred);
                     v.expect_block = Some(block);
-                    let (kept, n) = bring_to_head(&p.store, &p.project, &dev.cert, &dev.key, h, &mut v)?;
+                    let others = if crate::approve::on(p) { crate::approve::ref_versions(p) } else { vec![] };
+                    let (kept, n) = bring_to_head(&p.store, &p.project, &dev.cert, &dev.key, h, &others, &mut v)?;
                     if let Some(k) = kept {
                         let mut list: Vec<String> = std::fs::read(p.dir.join("kept.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
                         list.push(k.hex());
@@ -433,18 +434,32 @@ impl<A: FilmApp + ?Sized> Connector for View<'_, A> {
 /// Bring a window to the project's head `h`. Whatever the window held that differs is kept as
 /// a version off the main line (returned, for `kept.json`), then the head is applied and clips
 /// the head does not have are taken out. Returns (kept version, items that differed).
-pub fn bring_to_head<A: FilmApp + ?Sized>(store: &RedbStore, pr: &Project, cert: &DeviceCert, key: &DeviceKey, h: Id, app: &mut View<'_, A>) -> Result<(Option<Id>, usize)> {
+///
+/// S8: a state the project never had (in `h`'s history or `others`', the other refs an approve
+/// project knows) is the person's work, made while the window was not linked (a level set while
+/// kopanod was stopped): it stays in the window and the next save takes it. Only older states
+/// (an old file, a fresh window) are put back.
+#[allow(clippy::too_many_arguments)]
+pub fn bring_to_head<A: FilmApp + ?Sized>(store: &RedbStore, pr: &Project, cert: &DeviceCert, key: &DeviceKey, h: Id, others: &[Id], app: &mut View<'_, A>) -> Result<(Option<Id>, usize)> {
     let root = project::load_version(store, &h)?.tree()?;
     let want = tree::entries(store, root)?;
     let have = app.snapshot()?;
     let info = app.info();
-    let mut changes = Vec::new();
+    let mut differ = Vec::new();
     for (k, item) in &have {
         let id = item.put(store)?;
         if want.get(k) != Some(&id) {
-            changes.push((k.clone(), Some(id)));
+            differ.push((k.clone(), id));
         }
     }
+    let heads: Vec<Id> = std::iter::once(h).chain(others.iter().copied()).collect();
+    let seen = crate::seen_states(store, &heads, differ.iter().map(|(k, _)| k))?;
+    let (stale, work): (Vec<_>, Vec<_>) = differ.into_iter().partition(|(k, id)| seen.get(k).is_some_and(|s| s.contains(id)));
+    let work: BTreeSet<String> = work.into_iter().map(|(k, _)| k).collect();
+    if !work.is_empty() {
+        eprintln!("[kopanod] {}: a Film window was linked again with {} item(s) edited while it was not linked; kept in the window as edits", pr.id.short(), work.len());
+    }
+    let mut changes: Vec<(String, Option<Id>)> = stale.into_iter().map(|(k, id)| (k, Some(id))).collect();
     for (k, id) in &want {
         if !have.contains_key(k) && !k.starts_with(kopano_core::merge::CONFLICT_PREFIX) && info.owns(&Item::get(store, id)?.kind) {
             changes.push((k.clone(), None));
@@ -458,13 +473,16 @@ pub fn bring_to_head<A: FilmApp + ?Sized>(store: &RedbStore, pr: &Project, cert:
     let kept = project::commit(store, pr, vec![h], kept_root, "Kept: this window's own state when it was linked again", cert, key)?;
     store.flush()?;
     for (k, id) in &want {
+        if work.contains(k) {
+            continue;
+        }
         let item = Item::get(store, id)?;
         if info.owns(&item.kind) && have.get(k) != Some(&item) {
             app.apply(k, Some(&item))?;
         }
     }
     // edit parts last: removing a clip's edit part removes the clip
-    let mut extra: Vec<&String> = have.keys().filter(|k| !want.contains_key(*k)).collect();
+    let mut extra: Vec<&String> = have.keys().filter(|k| !want.contains_key(*k) && !work.contains(*k)).collect();
     extra.sort_by_key(|k| k.ends_with("#edit"));
     for k in extra {
         app.apply(k, None)?;
@@ -1133,8 +1151,20 @@ mod tests {
     #[test]
     fn a_relinked_window_is_brought_to_the_project_and_its_own_state_kept() -> Result<()> {
         let t = team("relink")?;
-        // the team trimmed clip 7, graded it, and removed clip 9
-        let h = commit(&t, &[("film/1/clip/7#edit", clip("b3-a", 80)), ("film/1/clip/7#grade", grade(0.9))])?;
+        // the project started from the file (clip 7 untrimmed, clip 9 graded 0.1), then the team
+        // trimmed clip 7, graded it, and removed clip 9
+        let start = commit(&t, &[("film/1/clip/7#edit", clip("b3-a", 100)), ("film/1/clip/9#edit", clip("b3-a", 30)), ("film/1/clip/9#grade", grade(0.1))])?;
+        let root = tree::update(
+            &t.store,
+            project::load_version(&t.store, &start)?.tree()?,
+            vec![
+                ("film/1/clip/7#edit".into(), Some(clip("b3-a", 80).put(&t.store)?)),
+                ("film/1/clip/7#grade".into(), Some(grade(0.9).put(&t.store)?)),
+                ("film/1/clip/9#edit".into(), None),
+                ("film/1/clip/9#grade".into(), None),
+            ],
+        )?;
+        let h = project::commit(&t.store, &t.pr, vec![start], root, "team edits", &t.cert, &t.key)?;
         // a fresh window opened the old file: clip 7 untrimmed, no grade, clip 9 still there
         let mut app = Fake {
             items: BTreeMap::from([("film/1/clip/7#edit".into(), clip("b3-a", 100)), ("film/1/clip/9#edit".into(), clip("b3-a", 30)), ("film/1/clip/9#grade".into(), grade(0.1))]),
@@ -1144,7 +1174,7 @@ mod tests {
         };
         let mut deferred = BTreeMap::new();
         let mut v = View::new(&t.store, Some(h), &mut app, &mut deferred);
-        let (kept, n) = bring_to_head(&t.store, &t.pr, &t.cert, &t.key, h, &mut v)?;
+        let (kept, n) = bring_to_head(&t.store, &t.pr, &t.cert, &t.key, h, &[], &mut v)?;
         assert_eq!(n, 4);
         assert_eq!(v.snapshot()?, tree::entries(&t.store, project::load_version(&t.store, &h)?.tree()?)?.into_iter().map(|(k, id)| (k, Item::get(&t.store, &id).unwrap())).collect());
         // nothing is saved afterwards: the window equals the project
@@ -1155,6 +1185,13 @@ mod tests {
         assert!(kept_items.contains_key("film/1/clip/9#edit"));
         assert!(!kept_items.contains_key("film/1/clip/7#grade"));
         assert_eq!(project::load_version(&t.store, &k)?.parents()?, vec![h]);
+        // S8: a window that stayed open while kopanod was stopped, with a grade set meanwhile:
+        // a state the project never had is the person's work and stays
+        v.app.items.insert("film/1/clip/7#grade".into(), grade(0.4));
+        let (_, n) = bring_to_head(&t.store, &t.pr, &t.cert, &t.key, h, &[], &mut v)?;
+        assert_eq!(n, 0, "nothing put back");
+        assert_eq!(v.app.items["film/1/clip/7#grade"], grade(0.4));
+        assert!(repo(&t, Some(h)).save(&mut v, "Edit in Film")?.is_some(), "and the next save takes it");
         Ok(())
     }
 
@@ -1165,7 +1202,7 @@ mod tests {
         let mut app = Fake { items: BTreeMap::from([("film/1/clip/7#edit".into(), clip("b3-a", 80))]), media: BTreeSet::from(["b3-a".into()]), refuse: BTreeSet::new(), blk: None };
         let mut deferred = BTreeMap::new();
         let mut v = View::new(&t.store, Some(h), &mut app, &mut deferred);
-        assert_eq!(bring_to_head(&t.store, &t.pr, &t.cert, &t.key, h, &mut v)?, (None, 0));
+        assert_eq!(bring_to_head(&t.store, &t.pr, &t.cert, &t.key, h, &[], &mut v)?, (None, 0));
         Ok(())
     }
 
