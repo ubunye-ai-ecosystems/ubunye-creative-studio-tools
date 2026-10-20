@@ -18,8 +18,10 @@
 //!    count as the project's state, so a save never reads "tile not here yet" as "tile undone".
 //!    The pixels are fetched from online teammates over iroh-blobs, through media.rs's gate
 //!    (only a current member's device, only hashes this project references).
-//! 4. After every call the window gets one update (one undo step in Photo). If Photo refuses it
-//!    because the user edited meanwhile, the model is dropped (nothing half-applied is sent) and
+//! 4. After every call the window gets one update (one undo step in Photo). The update is built
+//!    on the very snapshot the call saved first (`Repo::integrate`), so Photo refuses it when the
+//!    user edited after that snapshot. Then the model is dropped (nothing half-applied is sent),
+//!    what the call did to pending tiles and to a joining window is undone (`Live::rewind`), and
 //!    `Node::integrate` saves the user's edit and tries again.
 //! 5. Every tile and blob the window's items name is put in the node's media store before the
 //!    version naming it is pushed, so a teammate can fetch it at once.
@@ -135,6 +137,22 @@ impl<A: PhotoApp> Live<A> {
         }
         Ok(self.pending.len())
     }
+    /// What a call may change in this module's view of the window, kept so a failed call can
+    /// put it back (`rewind`).
+    fn mark(&self) -> Mark {
+        Mark { pending: self.pending.clone(), fresh: self.fresh, fresh_applied: self.fresh_applied.clone() }
+    }
+    /// After a failed call (Photo refused the update): the window never got the model, so what
+    /// this module believed about it must be as before the call too. Otherwise a tile applied
+    /// from `pending` (its pixels had come) would be neither pending nor in the window, and the
+    /// next save would read the window's old tile as "the user put it back"; and a joined window
+    /// whose first update was refused would stop being fresh and speak first with its own
+    /// document (the S3b class).
+    fn rewind(&mut self, m: Mark) {
+        self.pending = m.pending;
+        self.fresh = m.fresh;
+        self.fresh_applied = m.fresh_applied;
+    }
     /// A joined window that received the team's document: whatever else it held goes.
     fn finish_fresh(&mut self) -> Result<()> {
         if !self.fresh || self.fresh_applied.is_empty() {
@@ -149,6 +167,13 @@ impl<A: PhotoApp> Live<A> {
         self.fresh_applied.clear();
         Ok(())
     }
+}
+
+/// `Live::mark`: this module's view of the window before a call.
+struct Mark {
+    pending: BTreeMap<String, Pending>,
+    fresh: bool,
+    fresh_applied: BTreeSet<String>,
 }
 
 /// The window as the project sees it: pending items count as the project's state.
@@ -278,6 +303,7 @@ pub(crate) fn with_photo<R>(p: &Proj, dev: &Device, f: impl FnOnce(&mut dyn Conn
         }
         let live = g.as_mut().context("no Photo window")?;
         let t0 = Instant::now();
+        let mark = live.mark();
         let r = f(&mut View { live: &mut *live });
         let t1 = t0.elapsed();
         let r = r.and_then(|r| settle(p, live).map(|_| r));
@@ -285,8 +311,10 @@ pub(crate) fn with_photo<R>(p: &Proj, dev: &Device, f: impl FnOnce(&mut dyn Conn
             eprintln!("[kopanod] {}: Photo call took {} ms (work {} ms, update {} ms)", p.project.id.short(), t0.elapsed().as_millis(), t1.as_millis(), (t0.elapsed() - t1).as_millis());
         }
         if let Err(e) = &r {
-            // never send a half-applied model (the connector also flushes when dropped)
+            // never send a half-applied model (the connector also flushes when dropped), and
+            // forget what the call did to the pending tiles and the fresh window
             live.app.discard();
+            live.rewind(mark);
             if window_gone(e) {
                 *g = None; // reconnect next time (and bring that window to the project)
             }
@@ -760,6 +788,36 @@ mod tests {
         assert_eq!(live.app.keys(), vec!["layer/team".to_string()]);
         assert!(!live.fresh);
         assert_eq!(View { live: &mut live }.snapshot()?.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// Photo refused the update a call built: what the call did to the pending tiles and to a
+    /// joining window is undone too. Without that, a tile applied from pending was lost from
+    /// both (the next save read the window's old tile as the user's), and a joining window whose
+    /// first update was refused spoke first with its own document.
+    #[test]
+    fn a_refused_call_leaves_pending_tiles_and_a_joining_window_as_they_were() -> Result<()> {
+        let dir = temp("rewind");
+        std::fs::write(dir.join("old"), b"old!")?;
+        let mut live = Live::new(Fake { items: BTreeMap::from([("l@s@0_0".to_string(), tile("old"))]), dir: dir.clone(), flushed: 0 });
+        View { live: &mut live }.apply("l@s@0_0", Some(&tile("new")))?;
+        live.fresh = true;
+        // the call: the pixels came, the pending tile is applied, the joining window finished...
+        let mark = live.mark();
+        std::fs::write(dir.join("new"), b"new!")?;
+        View { live: &mut live }.apply("layer/team", Some(&layer(json!({"name": "Retouch"}))))?;
+        live.apply_ready()?;
+        live.finish_fresh()?;
+        // ...then Photo refused the update: the window still holds what it held
+        live.app.items = BTreeMap::from([("l@s@0_0".to_string(), tile("old"))]);
+        live.rewind(mark);
+        assert!(live.fresh, "still joining: it must not speak first");
+        assert!(View { live: &mut live }.snapshot()?.is_empty());
+        live.fresh = false;
+        assert_eq!(View { live: &mut live }.snapshot()?["l@s@0_0"], tile("new"), "the team's tile still waits to be applied");
+        assert_eq!(live.apply_ready()?, 0);
+        assert_eq!(live.app.items["l@s@0_0"], tile("new"));
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
