@@ -14,7 +14,7 @@
 
 use anyhow::{bail, Context, Result};
 use kopano_core::identity::DeviceKey;
-use kopano_node::{api_token, import_peer_dir, keystore, serve_api, Node};
+use kopano_node::{api_token, import_peer_dir, keystore, serve_api_on, unlinked, Node};
 use std::path::{Path, PathBuf};
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -48,12 +48,20 @@ fn init(home: &Path) -> Result<String> {
     Ok(DeviceKey::from_bytes(keystore::load(home)?).public_hex())
 }
 
+/// The Run value people see under Startup apps (Windows): never the protocol's name.
+const RUN_VALUE: &str = "ThabangVision collaboration";
+/// The Run value name before the installers (S4); `autostart` removes it either way.
+const OLD_RUN_VALUE: &str = "Kopano";
+
 /// Start at sign-in for this user only, without admin rights: the Run key on Windows, a
 /// LaunchAgent on macOS, a systemd user unit on Linux.
 fn autostart(on: bool, home: &Path, port: u16) -> Result<()> {
     let exe = std::env::current_exe()?;
     let cmdline = format!("\"{}\" run --home \"{}\" --api-port {port}", exe.display(), home.display());
     let run = |c: &mut std::process::Command| -> Result<()> {
+        // the installed kopanod has no console of its own (S4): keep reg.exe from opening one
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(c, 0x0800_0000); // CREATE_NO_WINDOW
         let out = c.output()?;
         if !out.status.success() {
             bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
@@ -62,10 +70,13 @@ fn autostart(on: bool, home: &Path, port: u16) -> Result<()> {
     };
     if cfg!(windows) {
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+        let _ = run(std::process::Command::new("reg").args(["delete", key, "/v", OLD_RUN_VALUE, "/f"]));
         if on {
-            run(std::process::Command::new("reg").args(["add", key, "/v", "Kopano", "/t", "REG_SZ", "/d", &cmdline, "/f"]))
+            run(std::process::Command::new("reg").args(["add", key, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &cmdline, "/f"]))
         } else {
-            run(std::process::Command::new("reg").args(["delete", key, "/v", "Kopano", "/f"]))
+            // already off is fine (an uninstaller may ask twice)
+            let _ = run(std::process::Command::new("reg").args(["delete", key, "/v", RUN_VALUE, "/f"]));
+            Ok(())
         }
     } else if cfg!(target_os = "macos") {
         let plist = PathBuf::from(std::env::var("HOME")?).join("Library/LaunchAgents/org.ubunye.kopano.plist");
@@ -84,7 +95,7 @@ fn autostart(on: bool, home: &Path, port: u16) -> Result<()> {
         let unit = PathBuf::from(std::env::var("HOME")?).join(".config/systemd/user/kopano.service");
         if on {
             std::fs::create_dir_all(unit.parent().context("unit folder")?)?;
-            std::fs::write(&unit, format!("[Unit]\nDescription=Kopano\n\n[Service]\nExecStart={cmdline}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"))?;
+            std::fs::write(&unit, format!("[Unit]\nDescription=ThabangVision collaboration\n\n[Service]\nExecStart={cmdline}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"))?;
             run(std::process::Command::new("systemctl").args(["--user", "enable", "--now", "kopano.service"]))
         } else {
             let _ = std::process::Command::new("systemctl").args(["--user", "disable", "--now", "kopano.service"]).output();
@@ -121,12 +132,27 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some("run") => {
+            // The port first: a second kopanod for this computer stops here, before it could go
+            // online with the same identity (S4: the app and start-at-login may both start one).
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .with_context(|| format!("kopanod is already running on this computer (port {port} is taken)"))?;
+            init(&home)?;
+            let token = api_token(&home)?; // before going online, so an app can read it straight away
+            // not signed in yet (a fresh install): answer the apps, stay offline (unlinked.rs)
+            let listener = if home.join("cert.json").exists() {
+                listener
+            } else {
+                tokio::select! {
+                    l = unlinked::serve_until_signed_in(&home, listener, token) => l?,
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                }
+            };
             let node = Node::open(&home)?;
-            api_token(&home)?; // before going online, so an app can read it straight away
             let router = node.start().await?;
             eprintln!("[kopanod] {} online as {}, {} project(s), app port {port}", node.device.cert.body.name, &node.device.id()[..8], node.projects.read().unwrap_or_else(|e| e.into_inner()).len());
             tokio::select! {
-                r = serve_api(node.clone(), port) => r?,
+                r = serve_api_on(node.clone(), listener) => r?,
                 _ = tokio::signal::ctrl_c() => {}
             }
             router.shutdown().await?;
