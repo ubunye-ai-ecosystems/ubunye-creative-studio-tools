@@ -8,6 +8,9 @@
 //!   I3 safety: every version anyone accepted passes the full permission check
 //!   I4 liveness after interruptions: a sync cut off part way never leaves a peer stuck
 //! Run: SIM_SEEDS=500 cargo test --release -p kopano-lab --test sim_fuzz -- --nocapture
+//! The test fails if any seed diverges, sticks or loses an edit. To study one seed:
+//! SIM_FIRST=14 SIM_SEEDS=1 SIM_DEBUG=1 (prints each final round and every refusal);
+//! SIM_ROUNDS sets how many final gossip rounds are allowed (default 6).
 
 use anyhow::{bail, Context, Result};
 use kopano_core::connector::{Connector, ConnectorInfo, KindInfo, CONTRACT_VERSION};
@@ -108,6 +111,8 @@ struct Stats {
     deletes: u64,
     objects_moved: u64,
     bytes_moved: u64,
+    /// final gossip rounds this seed needed to converge
+    rounds: u64,
 }
 
 struct World {
@@ -333,7 +338,10 @@ impl World {
             let mut rest = vec![];
             for (id, v) in new {
                 if v.parents()?.iter().all(|q| !ids.contains(q) || done.contains(q)) {
-                    if project::verify_version(&p.store, &project, &id).is_err() {
+                    if let Err(e) = project::verify_version(&p.store, &project, &id) {
+                        if std::env::var("SIM_DEBUG").is_ok() {
+                            eprintln!("  {} refused {} from {}: {e:#}", p.name, id.short(), head.short());
+                        }
                         self.stats.refused += 1;
                         return Ok(false);
                     }
@@ -352,6 +360,11 @@ impl World {
             Ok(kopano_core::repo::Integrated::Merged { conflicts, .. }) => {
                 self.stats.merges += 1;
                 self.stats.clashes += conflicts.len() as u64;
+            }
+            Ok(kopano_core::repo::Integrated::AlreadyHad) => {
+                if std::env::var("SIM_DEBUG").is_ok() && p.head != Some(head) {
+                    eprintln!("  {} already had {} (head {:?})", p.name, head.short(), p.head.map(|h| h.short()));
+                }
             }
             Ok(_) => {}
             Err(e) => bail!("STUCK: {} could not integrate: {e:#}", p.name),
@@ -462,8 +475,53 @@ fn check_no_silent_loss(w: &World, at: usize) -> Result<Vec<String>> {
         if superseded {
             continue;
         }
+        // A-B-A: the edit put back an item exactly as it was before (same content, same id), and
+        // a version that changed the key saw that very item. Three-way merging cannot tell such an
+        // edit from "unchanged" and the person who changed the key saw this state, so it is not a
+        // loss (seed 825: pick then none again, while someone deleted the photo flagged none).
+        let edited = tree::get(&p.store, project::load_version(&p.store, &e.version)?.tree()?, &e.key)?;
+        let mut seen_by_later = false;
+        for v in touched.get(&e.key).into_iter().flatten() {
+            // only a version made without knowing the edit (an older one saw an older state)
+            if *v == e.version || project::is_ancestor(&p.store, v, &e.version)? {
+                continue;
+            }
+            if let Some(fp) = project::load_version(&p.store, v)?.parents()?.first() {
+                if edited.is_some() && tree::get(&p.store, project::load_version(&p.store, fp)?.tree()?, &e.key)? == edited {
+                    seen_by_later = true;
+                    break;
+                }
+            }
+        }
+        if seen_by_later {
+            if std::env::var("SIM_DEBUG").is_ok() {
+                eprintln!("A-B-A edit, not a loss: {} {}={} in {}", e.key, e.field, e.value, e.version.short());
+            }
+            continue;
+        }
         if clash_values(&e.key, &e.field)?.contains(&e.value) {
             continue;
+        }
+        if std::env::var("SIM_DEBUG").is_ok() {
+            eprintln!("LOST {} {}={} in {}", e.key, e.field, e.value, e.version.short());
+            let mut hs = hist.clone();
+            hs.reverse();
+            for (vid, v) in &hs {
+                let ps = v.parents()?;
+                let val = |t: Option<Id>| -> String { tree::get(&p.store, t, &e.key).ok().flatten().map(|i| Item::get(&p.store, &i).map(|it| it.state[&e.field].to_string()).unwrap_or_default()).unwrap_or("-".into()) };
+                let mine = val(v.tree()?);
+                let pv: Vec<String> = ps.iter().map(|q| val(project::load_version(&p.store, q).ok().and_then(|x| x.tree().ok()).flatten())).collect();
+                if pv.iter().any(|x| *x != mine) || ps.is_empty() {
+                    let desc = project::is_ancestor(&p.store, &e.version, vid).unwrap_or(false);
+                    eprintln!("  {} by {} '{}' parents {:?} vals {:?} -> {} (after edit: {desc})", vid.short(), v.cert.body.name, v.v.body.message, ps.iter().map(|q| q.short()).collect::<Vec<_>>(), pv, mine);
+                    if ps.len() == 2 {
+                        for b in project::merge_bases(&p.store, &ps[0], &ps[1], 8)? {
+                            let bt = project::load_version(&p.store, &b)?.tree()?;
+                            eprintln!("      base {} val {} anc_of_edit {} edit_anc_of_base {}", b.short(), val(bt), project::is_ancestor(&p.store, &b, &e.version)?, project::is_ancestor(&p.store, &e.version, &b)?);
+                        }
+                    }
+                }
+            }
         }
         lost.push(format!("{} {}={} (now {:?})", e.key, e.field, e.value, now));
     }
@@ -500,13 +558,19 @@ fn run_seed(seed: u64, original_copier: bool, ops: usize) -> Result<(Stats, Vec<
             }
         }
         let first = w.content(honest[0]);
+        if std::env::var("SIM_DEBUG").is_ok() {
+            let t: Vec<String> = honest.iter().map(|&i| w.content(i).map(|x| x.short()).unwrap_or_default()).collect();
+            eprintln!("seed {seed} round {rounds}: {:?}", t);
+        }
         if honest.iter().all(|&i| w.content(i) == first) {
             break;
         }
-        if rounds > 6 {
+        let max_rounds: usize = std::env::var("SIM_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(6);
+        if rounds > max_rounds {
             bail!("I1 FAILED: honest peers did not converge after {rounds} rounds");
         }
     }
+    w.stats.rounds = rounds as u64;
     // I3: re-verify every version in the final history
     let p0 = honest[0];
     let project = Project::load(&w.peers[p0].store, &w.pid)?;
@@ -528,7 +592,9 @@ fn sim_reliability() -> Result<()> {
         let (mut ok, mut stuck, mut diverged, mut lost_seeds, mut lost_total) = (0, 0, 0, 0, 0);
         let mut total = Stats::default();
         let mut examples: Vec<String> = vec![];
-        for seed in 0..seeds {
+        let mut max_rounds = 0u64;
+        let first_seed: u64 = std::env::var("SIM_FIRST").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        for seed in first_seed..first_seed + seeds {
             match run_seed(seed, original, ops) {
                 Ok((s, lost)) => {
                     ok += 1;
@@ -551,6 +617,7 @@ fn sim_reliability() -> Result<()> {
                     total.deletes += s.deletes;
                     total.objects_moved += s.objects_moved;
                     total.bytes_moved += s.bytes_moved;
+                    max_rounds = max_rounds.max(s.rounds);
                 }
                 Err(e) => {
                     let m = format!("{e:#}");
@@ -565,11 +632,17 @@ fn sim_reliability() -> Result<()> {
                 }
             }
         }
+        total.rounds = max_rounds;
         println!(
             "{}",
-            json!({"copier": label, "seeds": seeds, "ops_per_seed": ops, "completed": ok, "stuck": stuck, "diverged": diverged,
+            json!({"copier": label, "seeds": seeds, "ops_per_seed": ops, "completed": ok, "stuck": stuck, "diverged": diverged, "max_final_rounds": max_rounds,
                    "seeds_with_silent_loss": lost_seeds, "silent_losses": lost_total, "stats": format!("{total:?}"), "examples": examples})
         );
+        // Fail loudly: a seed that diverges, sticks or loses an edit is a bug, never a statistic.
+        assert_eq!(diverged, 0, "I1: honest peers diverged: {examples:?}");
+        assert_eq!(stuck, 0, "I4: a peer got stuck: {examples:?}");
+        assert_eq!(lost_total, 0, "I2: silent losses: {examples:?}");
+        assert_eq!(ok as u64, seeds, "seeds failed for other reasons: {examples:?}");
     }
     Ok(())
 }
