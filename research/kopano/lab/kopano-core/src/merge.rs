@@ -62,67 +62,92 @@ pub fn merge_trees(store: &dyn ObjectStore, base: Option<Id>, mine: Option<Id>, 
         if m == t {
             continue;
         }
-        // Both sides changed this item differently.
-        let mut clash_fields = vec!["whole item".to_string()];
-        if let (Some(mi), Some(ti)) = (m, t) {
-            let (mi_item, ti_item) = (Item::get(store, &mi)?, Item::get(store, &ti)?);
-            let base_item = b.map(|id| Item::get(store, &id)).transpose()?;
-            let same_shape = mi_item.kind == ti_item.kind && mi_item.lane == ti_item.lane && mi_item.schema == ti_item.schema;
-            if same_shape && policy.mergeable(&mi_item.kind) {
-                let (state, mut fields) = jsonmerge::merge3(base_item.as_ref().map(|i| &i.state), &mi_item.state, &ti_item.state);
-                let assets = if mi_item.assets == ti_item.assets || base_item.as_ref().map(|i| &i.assets) == Some(&ti_item.assets) {
-                    mi_item.assets.clone()
-                } else if base_item.as_ref().map(|i| &i.assets) == Some(&mi_item.assets) {
-                    ti_item.assets.clone()
-                } else {
-                    fields.push("Media".into());
-                    let (ma, ta) = (json!(mi_item.assets), json!(ti_item.assets));
-                    if jsonmerge::deterministic_pick(&ma, &ta) == &ma { mi_item.assets.clone() } else { ti_item.assets.clone() }
-                };
-                let merged = Item { state, assets, ..mi_item.clone() };
-                let merged_id = merged.put(store)?;
-                if merged_id != mi {
-                    changes.push((key.clone(), Some(merged_id)));
-                    changed.push(key.clone());
-                }
-                if fields.is_empty() {
-                    continue;
-                }
-                clash_fields = fields;
-            }
+        let one = merge_one(store, &key, b, m, t, policy, true)?;
+        if one.value != m {
+            changes.push((key.clone(), one.value));
+            changed.push(key.clone());
         }
-        // Whole-item clash (cannot merge setting by setting, or deleted on one side and edited on
-        // the other): the same outcome on every device. Keeping data beats deleting it; otherwise
-        // the larger id wins. Mergeable clashes were already resolved deterministically above.
-        if clash_fields == ["whole item".to_string()] {
-            let keep = match (m, t) {
-                (None, t) => t,
-                (m, None) => m,
-                (Some(a), Some(b)) => Some(if a.hex() >= b.hex() { a } else { b }),
-            };
-            if keep != m {
-                changes.push((key.clone(), keep));
-                changed.push(key.clone());
-            }
+        if let Some((record_key, record_id, conflict)) = one.record {
+            changes.push((record_key, Some(record_id)));
+            conflicts.push(conflict);
         }
-        // The record names both sides in a fixed order, so every device writes the same record.
-        let (a, b) = if m.map(|i| i.hex()) <= t.map(|i| i.hex()) { (m, t) } else { (t, m) };
-        let record = Item {
-            kind: "kopano.conflict".into(),
-            lane: CONFLICT_LANE.into(),
-            schema: 1,
-            state: json!({
-                "key": key,
-                "fields": clash_fields,
-                "mine": a.map(|i| i.hex()),
-                "theirs": b.map(|i| i.hex()),
-            }),
-            assets: vec![],
-        };
-        let short = |x: Option<Id>| x.map(|i| i.short()).unwrap_or_else(|| "removed".into());
-        changes.push((format!("{CONFLICT_PREFIX}{key}/{}-{}", short(a), short(b)), Some(record.put(store)?)));
-        conflicts.push(Conflict { key, fields: clash_fields, mine: m, theirs: t });
     }
     let root = tree::update(store, mine, changes)?;
     Ok(MergeOutcome { root, conflicts, changed })
+}
+
+/// The merge of one item that both sides changed differently since the base.
+pub struct OneMerge {
+    /// What the merged version holds under the item's key.
+    pub value: Option<Id>,
+    /// The clash record to add (its key, its stored id, the clash), if the change clashed.
+    pub record: Option<(String, Id, Conflict)>,
+}
+
+/// Merge one item both sides changed differently (`b` base, `m` mine, `t` theirs, `m != t`). A
+/// pure function of the three values and the policy, so anyone can recompute it: that is how a
+/// receiver recognises a mechanical merge made by someone who may not edit the lane (E17).
+/// `write` false only names the results (`Id::of`) without storing them, for a receiver that is
+/// checking someone else's merge.
+pub fn merge_one(store: &dyn ObjectStore, key: &str, b: Option<Id>, m: Option<Id>, t: Option<Id>, policy: &dyn MergePolicy, write: bool) -> Result<OneMerge> {
+    let put = |item: &Item| -> Result<Id> {
+        if write {
+            item.put(store)
+        } else {
+            Ok(Id::of(&serde_json::to_vec(item)?))
+        }
+    };
+    let mut value = m;
+    let mut clash_fields = vec!["whole item".to_string()];
+    if let (Some(mi), Some(ti)) = (m, t) {
+        let (mi_item, ti_item) = (Item::get(store, &mi)?, Item::get(store, &ti)?);
+        let base_item = b.map(|id| Item::get(store, &id)).transpose()?;
+        let same_shape = mi_item.kind == ti_item.kind && mi_item.lane == ti_item.lane && mi_item.schema == ti_item.schema;
+        if same_shape && policy.mergeable(&mi_item.kind) {
+            let (state, mut fields) = jsonmerge::merge3(base_item.as_ref().map(|i| &i.state), &mi_item.state, &ti_item.state);
+            let assets = if mi_item.assets == ti_item.assets || base_item.as_ref().map(|i| &i.assets) == Some(&ti_item.assets) {
+                mi_item.assets.clone()
+            } else if base_item.as_ref().map(|i| &i.assets) == Some(&mi_item.assets) {
+                ti_item.assets.clone()
+            } else {
+                fields.push("Media".into());
+                let (ma, ta) = (json!(mi_item.assets), json!(ti_item.assets));
+                if jsonmerge::deterministic_pick(&ma, &ta) == &ma { mi_item.assets.clone() } else { ti_item.assets.clone() }
+            };
+            let merged = Item { state, assets, ..mi_item.clone() };
+            value = Some(put(&merged)?);
+            if fields.is_empty() {
+                return Ok(OneMerge { value, record: None });
+            }
+            clash_fields = fields;
+        }
+    }
+    // Whole-item clash (cannot merge setting by setting, or deleted on one side and edited on
+    // the other): the same outcome on every device. Keeping data beats deleting it; otherwise
+    // the larger id wins. Mergeable clashes were already resolved deterministically above.
+    if clash_fields == ["whole item".to_string()] {
+        value = match (m, t) {
+            (None, t) => t,
+            (m, None) => m,
+            (Some(a), Some(b)) => Some(if a.hex() >= b.hex() { a } else { b }),
+        };
+    }
+    // The record names both sides in a fixed order, so every device writes the same record.
+    let (a, b) = if m.map(|i| i.hex()) <= t.map(|i| i.hex()) { (m, t) } else { (t, m) };
+    let record = Item {
+        kind: "kopano.conflict".into(),
+        lane: CONFLICT_LANE.into(),
+        schema: 1,
+        state: json!({
+            "key": key,
+            "fields": clash_fields,
+            "mine": a.map(|i| i.hex()),
+            "theirs": b.map(|i| i.hex()),
+        }),
+        assets: vec![],
+    };
+    let short = |x: Option<Id>| x.map(|i| i.short()).unwrap_or_else(|| "removed".into());
+    let record_key = format!("{CONFLICT_PREFIX}{key}/{}-{}", short(a), short(b));
+    let conflict = Conflict { key: key.to_string(), fields: clash_fields, mine: m, theirs: t };
+    Ok(OneMerge { value, record: Some((record_key, put(&record)?, conflict)) })
 }
