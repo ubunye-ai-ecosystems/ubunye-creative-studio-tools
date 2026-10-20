@@ -213,6 +213,8 @@ pub fn verify_version_by(store: &dyn ObjectStore, project: &Project, id: &Id, ma
         other_trees.push(load_version(store, p)?.tree()?);
     }
     let account = &v.cert.body.account;
+    // base trees of a two-parent merge, worked out once and only when needed
+    let mut base_trees: Option<Vec<Option<Id>>> = None;
     for (key, before, after) in tree::diff(store, first_tree, root)? {
         let mut from_other_parent = false;
         for t in &other_trees {
@@ -226,10 +228,27 @@ pub fn verify_version_by(store: &dyn ObjectStore, project: &Project, id: &Id, ma
         // A mechanical merge of the two parents' items is reproducible, so anyone may make it,
         // even in lanes they may not edit (E17: a lane-limited editor catching up from main).
         if parents.len() == 2 {
+            if base_trees.is_none() {
+                let mut trees = Vec::new();
+                for b in merge_bases(store, &parents[0], &parents[1], 4)? {
+                    trees.push(load_version(store, &b)?.tree()?);
+                }
+                if trees.is_empty() {
+                    trees.push(None);
+                }
+                base_trees = Some(trees);
+            }
+            let bases = base_trees.as_deref().unwrap_or(&[]);
             if let Some(a) = after {
-                if mechanical_merge(store, &parents, other_trees[0], &key, before, a)? {
+                if mechanical_merge(store, bases, other_trees[0], &key, before, a)? {
                     continue;
                 }
+            }
+            // Anything else `merge::merge_trees` produces is reproducible too: a whole-item pick
+            // and the clash record it writes. Without this a viewer's merge that recorded a clash
+            // was refused by everyone, so that viewer never converged (E17 I1, 9 of 200 seeds).
+            if reproduces_merge(store, bases, first_tree, other_trees[0], &key, after)? {
+                continue;
             }
         }
         // A new value: the author needs write permission on the lane of what changed.
@@ -243,26 +262,56 @@ pub fn verify_version_by(store: &dyn ObjectStore, project: &Project, id: &Id, ma
     Ok(v)
 }
 
-fn mechanical_merge(store: &dyn ObjectStore, parents: &[Id], other_tree: Option<Id>, key: &str, mine: Option<Id>, after: Id) -> Result<bool> {
+fn mechanical_merge(store: &dyn ObjectStore, bases: &[Option<Id>], other_tree: Option<Id>, key: &str, mine: Option<Id>, after: Id) -> Result<bool> {
     let (Some(m), Some(t)) = (mine, tree::get(store, other_tree, key)?) else { return Ok(false) };
     let (mi, ti, ai) = (Item::get(store, &m)?, Item::get(store, &t)?, Item::get(store, &after)?);
     if mi.kind != ti.kind || mi.lane != ti.lane || mi.schema != ti.schema || ai.kind != mi.kind || ai.lane != mi.lane {
         return Ok(false);
     }
     // the merge may have used any of the best common ancestors (merge_bases)
-    let mut bases: Vec<Option<Id>> = merge_bases(store, &parents[0], &parents[1], 4)?.into_iter().map(Some).collect();
-    if bases.is_empty() {
-        bases.push(None);
-    }
-    for b in bases {
-        let base_tree = match b {
-            Some(b) => load_version(store, &b)?.tree()?,
-            None => None,
-        };
-        let bi = tree::get(store, base_tree, key)?.map(|b| Item::get(store, &b)).transpose()?;
+    for base_tree in bases {
+        let bi = tree::get(store, *base_tree, key)?.map(|b| Item::get(store, &b)).transpose()?;
         let (state, _) = crate::jsonmerge::merge3(bi.as_ref().map(|i| &i.state), &mi.state, &ti.state);
         if state == ai.state && (ai.assets == mi.assets || ai.assets == ti.assets) {
             return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Does `merge::merge_one` give exactly `after` under `key`, for some best common ancestor and
+/// either merge policy? The receiver does not know the author's connector policy, so it tries
+/// both; each is a pure function of verified parents, so neither lets anyone write a new value.
+/// For a clash record key, the record must be the one the merge of its item writes.
+fn reproduces_merge(store: &dyn ObjectStore, bases: &[Option<Id>], mine_tree: Option<Id>, theirs_tree: Option<Id>, key: &str, after: Option<Id>) -> Result<bool> {
+    let item_key = if key.starts_with(crate::merge::CONFLICT_PREFIX) {
+        let Some(a) = after else { return Ok(false) };
+        let rec = Item::get(store, &a)?;
+        if rec.kind != "kopano.conflict" || rec.lane != crate::merge::CONFLICT_LANE {
+            return Ok(false);
+        }
+        match rec.state["key"].as_str() {
+            Some(k) => k.to_string(),
+            None => return Ok(false),
+        }
+    } else {
+        key.to_string()
+    };
+    let (m, t) = (tree::get(store, mine_tree, &item_key)?, tree::get(store, theirs_tree, &item_key)?);
+    if m == t {
+        return Ok(false);
+    }
+    for base_tree in bases {
+        let b = tree::get(store, *base_tree, &item_key)?;
+        if b == m || b == t {
+            continue; // only one side changed it: no merge of this item happened against this base
+        }
+        for mergeable in [true, false] {
+            let one = crate::merge::merge_one(store, &item_key, b, m, t, &move |_: &str| mergeable, false)?;
+            let ok = if item_key == key { one.value == after } else { one.record.is_some_and(|(rk, rid, _)| rk == key && Some(rid) == after) };
+            if ok {
+                return Ok(true);
+            }
         }
     }
     Ok(false)

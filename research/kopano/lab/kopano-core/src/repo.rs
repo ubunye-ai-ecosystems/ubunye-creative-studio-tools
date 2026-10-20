@@ -316,4 +316,60 @@ mod criss_cross {
         assert_eq!(a.0["x"], tile("x1"));
         Ok(())
     }
+
+    /// A viewer may not edit, but it still merges what it receives. When the two heads clash on
+    /// a tile, its merge records the clash. Everyone must accept that merge, because anyone can
+    /// recompute it; refusing it left the viewer on its own content forever (E17 I1: 9 of 200
+    /// seeds). A "merge" that is not the mechanical one stays refused.
+    #[test]
+    fn a_viewers_merge_that_records_a_clash_is_accepted() -> Result<()> {
+        let store = MemStore::default();
+        let provider = Provider::generate();
+        let (ka, kc, kv) = (DeviceKey::generate(), DeviceKey::generate(), DeviceKey::generate());
+        let ca = provider.issue("alice", "Alice", &ka, "t", 3_600_000)?;
+        let cc = provider.issue("carol", "Carol", &kc, "t", 3_600_000)?;
+        let cv = provider.issue("vic", "Vic", &kv, "t", 3_600_000)?;
+        let members = BTreeMap::from([
+            ("carol".to_string(), Member { role: Role::Editor, lanes: vec![] }),
+            ("vic".to_string(), Member { role: Role::Viewer, lanes: vec![] }),
+        ]);
+        let p = Project::create(&store, "x", vec![provider.public_hex()], &ca, &ka, members)?;
+        let start = BTreeMap::from([("t".to_string(), tile("a"))]);
+        let mut a = Tiles(start.clone());
+        let mut ra = Repo { store: &store, project: Project::load(&store, &p.id)?, head: None, cert: ca.clone(), key: DeviceKey::from_bytes(ka.to_bytes()) };
+        let v0 = ra.save(&mut a, "start")?.unwrap();
+        let mut c = Tiles(start.clone());
+        let mut rc = Repo { store: &store, project: Project::load(&store, &p.id)?, head: Some(v0), cert: cc, key: kc };
+        a.0.insert("t".into(), tile("a1"));
+        let a1 = ra.save(&mut a, "alice paints t")?.unwrap();
+        c.0.insert("t".into(), tile("c1"));
+        let c1 = rc.save(&mut c, "carol paints t")?.unwrap();
+        let mut v = Tiles(start);
+        let mut rv = Repo { store: &store, project: Project::load(&store, &p.id)?, head: Some(v0), cert: cv.clone(), key: DeviceKey::from_bytes(kv.to_bytes()) };
+        assert!(matches!(rv.integrate(&mut v, &a1)?, Integrated::FastForward { .. }));
+        let merged = match rv.integrate(&mut v, &c1)? {
+            Integrated::Merged { version, conflicts, .. } => {
+                assert_eq!(conflicts.len(), 1, "the tile clash is recorded");
+                version
+            }
+            _ => panic!("expected a merge"),
+        };
+        let project = Project::load(&store, &p.id)?;
+        project::verify_version(&store, &project, &merged)?;
+        // Alice takes it and lands on the same content as Vic.
+        assert!(matches!(ra.integrate(&mut a, &merged)?, Integrated::FastForward { .. }));
+        assert_eq!(ra.head_tree()?, rv.head_tree()?);
+
+        // Not mechanical: Vic paints the tile himself inside a merge. Refused.
+        let a1_tree = project::load_version(&store, &a1)?.tree()?;
+        let forged = tree::update(&store, a1_tree, vec![("t".into(), Some(tile("v").put(&store)?))])?;
+        let f = project::commit(&store, &project, vec![a1, c1], forged, "forged", &cv, &kv)?;
+        assert!(project::verify_version(&store, &project, &f).is_err(), "a viewer's own value inside a merge");
+        // Not mechanical: a clash record the merge would not write. Refused.
+        let fake = Item { kind: "kopano.conflict".into(), lane: crate::merge::CONFLICT_LANE.into(), schema: 1, state: json!({"key": "t", "fields": ["made up"], "mine": null, "theirs": null}), assets: vec![] };
+        let forged = tree::update(&store, a1_tree, vec![(format!("{CONFLICT_PREFIX}t/x-y"), Some(fake.put(&store)?))])?;
+        let f = project::commit(&store, &project, vec![a1, c1], forged, "forged record", &cv, &kv)?;
+        assert!(project::verify_version(&store, &project, &f).is_err(), "a made-up clash record");
+        Ok(())
+    }
 }
