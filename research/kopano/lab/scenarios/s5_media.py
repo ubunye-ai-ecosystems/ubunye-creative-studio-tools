@@ -235,6 +235,7 @@ try:
     # the gate: a device with a valid certificate from the same sign-in provider, but not a
     # member of this project, asks Alice's kopanod for an original by its hash
     if '--peer' in sys.argv and '--stranger' in sys.argv:
+      try:
         peer, stranger = sys.argv[sys.argv.index('--peer') + 1], sys.argv[sys.argv.index('--stranger') + 1]
         sd = f'{W}/stranger'
         os.makedirs(sd)
@@ -250,6 +251,8 @@ try:
         # the client only sees the connection drop; Alice's kopanod says why
         time.sleep(1)
         res['gate']['alice_log'] = [l.strip() for l in open(f'{W}/a/kopanod.log', errors='replace') if 'media: refused' in l][-2:]
+      except Exception as e:
+        res['gate'] = {'error': repr(e)}
     sa, sb = kcall('a', op='status', project=pid), kcall('b', op='status', project=pid)
     res['same_head'] = sa['head'] == sb['head']
     res['media_b'] = {k: v for k, v in kcall('b', op='media', project=pid).items() if k != 'items'}

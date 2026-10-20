@@ -109,17 +109,18 @@ original when needed. Code: `lab/kopano-node/src/media.rs`; test: `lab/scenarios
    `original {photo, state, mb_done, mb_total}`, `preview-made` (on the owner's side). API `media`
    says per photo whether it shows from its original, from a preview, or is still waiting.
 
-**Real test (2026-10-19, this PC, the owner's 5 Sony ARWs, Light windows driven by its control
-channel, screenshots in T:/kopano-lab/media/final)**
+**Real test (2026-10-20, this PC, the owner's 5 Sony ARWs, Light windows driven by its control
+channel, kopanod with the S4 changes merged; screenshots in T:/kopano-lab/media/final)**
 
 | Step | Result |
 |---|---|
-| Member1's Light starts empty, joins | 5 of 5 photos arrived as previews: 3.3 MB in total for 246.5 MB of originals (1.3 %); first photo 10 s, all 36 s after joining (renders 4-7 s each on the owner's side) |
-| Alice edits exposure on her RAW | Member1's preview follows in 2.1 s |
-| Member1 edits contrast and stars on the preview | Alice's RAW follows in 2.1 s (stars 0.4 s): the key matches |
-| Member1 fetches one original (49.4 MB) | 0.5 s transfer on this PC, 1.9 s to swap in Light; the RAW shows with exposure +1.25, contrast +40, 4 stars; still 5 photos |
-| Alice edits again | Member1's original follows in 2.4 s; both heads equal |
-| A non-member device (valid certificate) asks Alice for an original | refused at connect |
+| Member1's Light starts empty, joins | 5 of 5 photos arrived as previews: 3.3 MB in total for 246.5 MB of originals (1.3 %); first photo 6.4 s, all 17.6 s after joining (renders 2-5 s each on Alice's side, made ahead) |
+| Alice edits exposure on her RAW | Member1's preview follows in 0.9 s |
+| Member1 edits contrast and stars on the preview | Alice's RAW follows in 1.3 s (stars 0.05 s): the key matches |
+| Member1 fetches one original (49.4 MB) | 0.8 s transfer on this PC, 1.6 s to swap in Light; the RAW shows with exposure +1.25, contrast +40, 4 stars; still 5 photos |
+| Alice edits again | Member1's original follows in 1.3 s; both heads equal |
+| Carol (valid certificate, not a member) asks Alice for an original | refused at connect (Alice's log: `media: refused 6c1be93e`); her tool only sees "connection lost" |
+| Regressions | S1 20/20 edits, median 123 ms, both ways, clashes settle, restart catch-up; S3 Light to Light 1.4 s exposure, 0.7 s stars, slider drag 1.2 s, same head |
 
 **Limits found (honest)**
 
