@@ -441,3 +441,91 @@ KOPANO_API_PORT, the owner's 3 Sony XAVC clips; screenshots in T:/kopano-lab/fil
   the original later; Film may keep the proxy's frame size in the item info (not tested).
 - Film shows "Media missing" with a P badge on proxy clips and asks to link footage when the
   file opens; the panel should say the footage is on its way.
+
+## 9. Slice "approve": the owner's line moves only when she approves
+
+Before this slice kopanod ran one shared live line: every edit went to everyone. The core already
+had the owner's v2 model (`kopano-core/src/workflow.rs`: main owned by the creator, one branch
+per member, signed ref updates, approvers, members log, seal after members changes, forks offered
+again), tested only in the simulator. Now kopanod runs it. Code: `lab/kopano-node/src/approve.rs`
+(lib.rs gains the hooks); core: `Genesis.mode`, `workflow::review_of`, `workflow::approve_with`;
+test: `lab/scenarios/s7_approve.py`. Light panel: branch `feature/kopano-approve`
+(`crates/ui-egui/src/ubunye/kopano.rs`, `kopano_panel.rs`).
+
+**How it works**
+
+1. The mode is chosen when sharing (`create-project {mode: "live" | "approve"}`; the API and the
+   panel default to "approve" for new projects). It is written into the owner-signed genesis, so
+   every member reads the same mode. A live project writes no mode field, so its genesis bytes
+   and id stay what they were: every existing project stays live.
+2. What each window shows is the project's `head` on that device. The owner's window shows main
+   and her edits go straight to main (a signed update of `main`). A member's edits go to
+   `branch/<account>`; his window shows his branch with the latest main merged in, or main itself
+   when nothing of his waits. He sees his own edits at once.
+3. Sync is the same watch/push channel. In approve mode a push also carries the ref updates and
+   members entries the watcher lacks (kept in `refs.json` and `members.json`, objects stored
+   before the files that name them). A receiver checks every ref (`workflow::check_ref` and the
+   chain rules) and the history under it: under an approver's main only signatures and
+   certificates (the approver vouches), under a branch the author's lanes by the members the
+   update cites. Membership (sync and media gate) comes from the genesis plus the signed members
+   log; media still flows by membership as before.
+4. API: `pending` (per member: photos changed since the main they built on, what changed per
+   photo, clashes with main with both values), `approve {member, version, prefer, choices}`
+   (a merge into main, signed; each clash decided per photo or item: "member" or "main"),
+   `decline {member, version}` (an approver-signed `review/<account>` mark; main stays, the
+   branch keeps the work), `view {member, show: member | main | off}` (the owner's window shows
+   the member's version of the photos he changed, or hers; her saves pause until "off", so
+   looking never reaches main), `set-approver {account, approver}` (a members entry, then main is
+   sealed). `status` gains `mode` and `review`; events `review` tell the panel what changed. A
+   member who is not an approver is refused locally, and a main update he signs anyway is refused
+   by every receiver.
+5. Declined stays declined when main moves on: a branch whose only new versions since the
+   declined one are catch-up merges is not offered for review again; the member's next edit is.
+6. Live projects also gain a clash pick: `status.clashes` lists open clashes with both values of
+   the clashing setting, `resolve {clash, pick: a | b}` writes that value (other settings stay
+   as merged), removes the clash record and sends it to everyone.
+
+**Panel (Light).** Share offers "I approve changes" (default) and "Work together live". The owner
+sees "Changes to review": "Member1 changed 1 photo  View  Approve  Decline"; View turns into
+Before / After / Done; a clash shows both values with "Keep yours" / "Take theirs". The member sees
+"Alice approves changes" and "You changed 1 photo · Waiting for Alice's approval", then
+"Approved: Alice took your changes" or "Declined: Alice kept the library as it was. Your changes
+stay in your window." A live library shows its clashes with one button per value. No protocol
+name on screen.
+
+**Real test (2026-10-20, this PC, two Light windows (release build) each with its own kopanod
+(debug build, own KOPANO_HOME and KOPANO_API_PORT), the owner's 5 Sony ARWs in both libraries,
+panels open; screenshots of both windows at every step in T:/kopano-lab/approve)**
+
+| Step | Result |
+|---|---|
+| Alice shares in approve mode, Member1 joins | 15 items, 5 photos; his window shows main 0.8 s after the join returned |
+| Member1: exposure +1.5 and 4 stars | his window at once; Alice's main and window unchanged (exposure 0, 0 stars); her panel "Member1 changed 1 photo" after 0.7 s; his "Waiting for Alice's approval" |
+| Alice presses View, Before, Done | her window shows his +1.5 (0.5 s), then her 0; main unchanged, nothing saved |
+| Alice approves | her window has +1.5 and 4 stars 0.4 s after the command; his panel "Approved"; his window is main again |
+| Member1: contrast +30, Alice declines | her main and window unchanged; his window keeps +30; his panel "Declined" |
+| Alice edits another photo on main (exposure -0.7) | in his window 0.7 s (3.4 s in the run before); his declined +30 stays; still "Declined", nothing to review |
+| Both kopanod stopped and started | heads, review state ("Declined") and windows kept; his next edit (contrast 35) waits for review again |
+| Member1 presses Approve on his own work | refused ("Only the owner, or someone the owner made an approver, can approve changes"), also on his panel; main unchanged on both |
+| Checks | 30 of 30 in two runs in a row (the first run, 29 of 29, found the declined work offered again after main moved; fixed and added as a check and a unit test) |
+
+Regressions on this branch: kopano-core 10 of 10 plus 3; kopano-node 33 of 33 (10 new: approve, decline, owner edits reach a member with work waiting, clashes per photo, a non-approver and a forged main update refused, approver granted and taken back, view saves nothing, restart keeps state, live genesis bytes unchanged, live clash pick); Light panel tests 24 of 24 (4 new), clippy and fmt clean; sim_workflow 200 of 200; attacks 4 of 4; sim_fuzz 200 seeds, 0 diverged, 0 stuck, 0 silent losses, refused updates 200 seeds 0 lost; S1 20 of 20 edits (median 936 ms, debug build, busy PC), both ways, concurrent edits settle, restart catch-up; S3 in live mode (now asked for explicitly) exposure 0.8 s, stars 0.9 s, slider drag 1.0 s, same head.
+
+**Limits found (honest)**
+
+- Tested end to end with Light only. Photo and Film windows sign their saves into the branch too
+  (the same hook), but no real Photo or Film run in approve mode yet.
+- The owner's edits in her window while she views a member's version are not saved (saves pause
+  until Done; the panel says so).
+- Names come from certificates seen (handshake, genesis, ref updates); until one is seen, the panel
+  shows the account.
+- One approver in the real test: two approvers approving at once (a main fork, offered again) is
+  covered by sim_workflow and the code path, not by a real run. Restarting the Light windows
+  themselves (not only kopanod) was not part of S7.
+- `pending` diffs every waiting branch on each status poll; fine for a shoot, not measured at
+  thousands of photos.
+- Older panels that send no mode now create approve projects (the API default; scripts that
+  want live say `mode: "live"`, as S3 now does). A kopanod from before this slice refuses an
+  approve project's genesis (its signature no longer checks without the mode field), so it can
+  not join one by mistake. Adding and removing members and blocking a device have no API yet
+  (only `set-approver`).
