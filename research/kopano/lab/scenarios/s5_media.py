@@ -7,14 +7,22 @@ Alice's edits, then fetch one original, which replaces its preview with every ed
 Every step is screenshotted in both windows (ui.screenshot over the control channel; no OS
 input) and put side by side with a caption.
 
+Previews are Light's own Smart Previews (.lcsp) when Alice's Light can export them; with
+--owner-light <older lightcraft.exe> Alice runs a Light without that command and kopanod falls
+back to rendered JPEGs. Accuracy: the same edit (exposure +2, highlights -60) made by Alice
+reaches Member1's preview; both windows render the photo at 1280 px (ui.render) and the mean
+absolute difference per channel (out of 255) is reported, as shot and edited.
+
 Usage: python s5_media.py <lightcraft.exe> <lightcraft-cli.exe> <kopanod.exe> <work dir>
-       <alice lab dir> <m1 lab dir> <photos dir> [--port-base 47200 --light-base 18200]"""
+       <alice lab dir> <m1 lab dir> <photos dir> [--port-base 47200 --light-base 18200]
+       [--owner-light <lightcraft.exe>] [--peer <peer.exe> --stranger <lab dir>]"""
 import json, os, shutil, socket, subprocess, sys, threading, time
 
 LIGHT, CLI, K, W, ALICE, M1, PHOTOS = sys.argv[1:8]
 opt = lambda n, d: int(sys.argv[sys.argv.index(n) + 1]) if n in sys.argv else d
 KB, LB = opt('--port-base', 47200), opt('--light-base', 18200)
 LP, KP = {'a': LB + 1, 'b': LB + 2}, {'a': KB + 1, 'b': KB + 2}
+OWNER_LIGHT = sys.argv[sys.argv.index('--owner-light') + 1] if '--owner-light' in sys.argv else LIGHT
 SHOTS = os.path.join(W, 'shots')
 res = {'steps': []}
 
@@ -103,6 +111,35 @@ def shots(tag, caption):
     res['steps'].append({'tag': tag, 'caption': caption, **paths})
 
 
+def render(l, i, tag):
+    p = os.path.abspath(f'{W}/renders/{tag}.png')
+    l.rpc('ui.render', {'id': i, 'size': 1280, 'path': p})
+    return p
+
+
+def diff(pa, pb):
+    """Mean absolute difference per channel out of 255 (pixels, and 16 px blocks)."""
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(Image.open(pa).convert('RGB'), dtype=np.float32)
+    bi = Image.open(pb).convert('RGB')
+    if bi.size != (a.shape[1], a.shape[0]):
+        bi = bi.resize((a.shape[1], a.shape[0]), Image.LANCZOS)
+    b = np.asarray(bi, dtype=np.float32)
+    k = 16
+    H, Wd = a.shape[0] // k * k, a.shape[1] // k * k
+    blk = lambda x: x[:H, :Wd].reshape(H // k, k, Wd // k, k, 3).mean(axis=(1, 3))
+    return {'pixel': round(float(np.abs(a - b).mean()), 3), 'block16': round(float(np.abs(blk(a) - blk(b)).mean()), 3), 'shape': list(a.shape[:2])}
+
+
+def accuracy(tag, pairs):
+    rows = []
+    for stem, ia, ib in pairs:
+        rows.append({'photo': stem, **diff(render(la, ia, f'{tag}-{stem}-a'), render(lb, ib, f'{tag}-{stem}-b'))})
+    px = [r['pixel'] for r in rows]
+    return {'mean': round(sum(px) / len(px), 3), 'worst': max(px), 'block16_mean': round(sum(r['block16'] for r in rows) / len(rows), 3), 'rows': rows}
+
+
 def side_by_side(step):
     from PIL import Image, ImageDraw, ImageFont
     a, b = Image.open(step['a']).convert('RGB'), Image.open(step['b']).convert('RGB')
@@ -130,6 +167,7 @@ def side_by_side(step):
 
 shutil.rmtree(W, ignore_errors=True)
 os.makedirs(SHOTS)
+os.makedirs(f'{W}/renders')
 for who, src in (('a', ALICE), ('b', M1)):
     os.makedirs(f'{W}/{who}/projects')
     for f in ('device.key', 'cert.json'):
@@ -138,7 +176,7 @@ env = {**os.environ, 'KOPANO_LIGHT_CLI': CLI}
 procs, events = [], []
 try:
     for who in 'ab':
-        args = [LIGHT, '--memory', '--control', str(LP[who]), '--no-demo'] + ([PHOTOS] if who == 'a' else [])
+        args = [OWNER_LIGHT if who == 'a' else LIGHT, '--memory', '--control', str(LP[who]), '--no-demo'] + ([PHOTOS] if who == 'a' else [])
         procs.append(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=open(f'{W}/light-{who}.log', 'w')))
         log = open(f'{W}/{who}/kopanod.log', 'w')
         procs.append(subprocess.Popen([K, 'run', '--home', f'{W}/{who}', '--api-port', str(KP[who])], stdout=log, stderr=log, env=env))
@@ -173,12 +211,31 @@ try:
     st = kcall('b', op='media', project=pid)
     res['previews']['media_status'] = {k: st[k] for k in ('photos', 'from_original', 'from_preview', 'waiting')}
     pv_dir = f'{W}/b/media/previews/{pid[:8]}'
-    sizes = {f: os.path.getsize(os.path.join(pv_dir, f)) for f in os.listdir(pv_dir)} if os.path.isdir(pv_dir) else {}
+    sizes = {f: os.path.getsize(os.path.join(pv_dir, f)) for f in os.listdir(pv_dir) if not f.startswith('.')} if os.path.isdir(pv_dir) else {}
+    res['previews']['formats'] = sorted({os.path.splitext(f)[1] for f in sizes})
+    res['previews']['received_mb'] = round(sum(e.get('mb') or 0 for _, e in events if e.get('event') == 'media' and 'mb' in e), 2)
     res['previews']['files'] = sizes
     res['previews']['mb_total'] = round(sum(sizes.values()) / 1e6, 2)
     res['previews']['original_mb_total'] = round(sum(os.path.getsize(os.path.join(PHOTOS, f)) for f in os.listdir(PHOTOS)) / 1e6, 1)
     res['previews']['events'] = [e for _, e in events if e.get('event') in ('media',)][-3:]
     shots('1-previews-arrived', '1. Member1 joined: Alice\'s 5 photos arrived as previews (no originals moved).')
+
+    # accuracy: every photo, as shot, then Alice's edit (exposure +2, highlights -60) on Member1's preview
+    stems = sorted(os.path.splitext(f)[0] for f in os.listdir(PHOTOS) if not f.startswith('.'))
+    pairs = [(st_, la.by_stem(st_)['id'], lb.by_stem(st_)['id']) for st_ in stems]
+    res['accuracy'] = {'as_shot': accuracy('as-shot', pairs)}
+    t0 = time.time()
+    for _, ia, _ in pairs:
+        la.cmd('develop.set', control='light.exposure', value=2.0, ids=[ia])
+        la.cmd('develop.set', control='light.highlights', value=-60, ids=[ia])
+    ok = lambda ib: (lambda d: abs((d.get('exposure') or 0) - 2.0) < 1e-6 and abs((d.get('highlights') or 0) + 60) < 1e-6)(lb.develop(ib).get('light', {}))
+    res['accuracy']['edit_reached_member1_ms'] = wait_for(lambda: all(ok(ib) for _, _, ib in pairs), 60)
+    time.sleep(1)
+    res['accuracy']['exp+2_hl-60'] = accuracy('exp2-hl60', pairs)
+    for _, ia, _ in pairs:
+        la.cmd('develop.set', control='light.exposure', value=0.0, ids=[ia])
+        la.cmd('develop.set', control='light.highlights', value=0, ids=[ia])
+    wait_for(lambda: all(abs((lb.develop(ib).get('light', {}).get('highlights') or 0)) < 1e-6 for _, _, ib in pairs), 60)
 
     # the same photo large in both windows
     ta, tb = la.by_stem('DSC08379'), lb.by_stem('DSC08379')
@@ -217,10 +274,12 @@ try:
     res['original'].update({'ms': done, 'result': fin, 'progress_events': len([1 for _, e in events if e.get('event') == 'original' and e.get('state') == 'downloading'])})
     wait_for(lambda: (lb.by_stem('DSC08379') or {}).get('fileName', '').upper().endswith('.ARW'), 30)
     tb2 = lb.by_stem('DSC08379')
+    src = lb.cmd('photo.inspect', id=tb2['id']).get('source', {})
     d2 = lb.develop(tb2['id'])
     res['original']['member1_now'] = {'file': tb2['fileName'], 'kind': tb2.get('kind'), 'exposure': d2.get('light', {}).get('exposure'),
                                       'contrast': d2.get('light', {}).get('contrast'), 'rating': lb.cmd('photo.inspect', id=tb2['id']).get('rating'),
-                                      'photos_in_window': len(lb.photos())}
+                                      'photos_in_window': len(lb.photos()), 'source': src.get('path'),
+                                      'same_light_id': tb2['id'] == idb}
     idb = tb2['id']
     lb.cmd('library.select', ids=[idb], active=idb)
     lb.rpc('ui.set', {'view': 'detail'})

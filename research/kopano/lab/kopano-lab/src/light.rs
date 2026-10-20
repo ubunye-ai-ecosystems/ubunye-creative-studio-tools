@@ -137,6 +137,29 @@ pub struct LightConnector {
     /// photo key -> Light id of the preview photo standing in for it (also when hidden because
     /// the original arrived and was imported beside it).
     alias_ids: BTreeMap<String, u64>,
+    /// Photos Light shows from a Smart Preview another device made (kopanod media, Light with
+    /// `library.addFromSmartPreview`): the project's photo key -> the original's assets. Light
+    /// keys these by the ORIGINAL's content hash itself, so no alias is needed; a stand-in not
+    /// listed here is never published.
+    pub stand_ins: BTreeMap<String, Vec<AssetRef>>,
+    /// photo key -> Light id of the stand-in showing it, as of the last snapshot.
+    stand_in_ids: BTreeMap<String, u64>,
+}
+
+/// How Light names the file of a photo shown from a Smart Preview (its original is elsewhere).
+pub const STAND_IN: &str = "smart-preview:/";
+
+/// The first bytes of a Light Smart Preview (.lcsp).
+pub const SMART_PREVIEW_MAGIC: &[u8] = b"LCSP1
+";
+
+fn is_stand_in(p: &Value) -> bool {
+    p.pointer("/source/path").and_then(Value::as_str).is_some_and(|s| s.starts_with(STAND_IN))
+}
+
+/// This Light lacks the command (an older build): the caller falls back to another way.
+pub fn lacks_command(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("unknown command")
 }
 
 /// A preview standing in for an original (kopanod media). The key is the ORIGINAL's photo key
@@ -192,7 +215,7 @@ impl LightConnector {
         Ok(Self::with(Transport::control(port)?, ""))
     }
     fn with(t: Transport, cli: &str) -> Self {
-        Self { t, cli: cli.into(), ids: BTreeMap::new(), hashes: BTreeMap::new(), previews: BTreeMap::new(), preview_dir: None, alias_ids: BTreeMap::new() }
+        Self { t, cli: cli.into(), ids: BTreeMap::new(), hashes: BTreeMap::new(), previews: BTreeMap::new(), preview_dir: None, alias_ids: BTreeMap::new(), stand_ins: BTreeMap::new(), stand_in_ids: BTreeMap::new() }
     }
 
     /// Light shows this photo (natively or from a preview), as of the last snapshot.
@@ -205,7 +228,29 @@ impl LightConnector {
     }
     /// Light shows this photo from its original file (not from a preview).
     pub fn has_original(&self, key: &str) -> bool {
-        self.has_photo(key) && self.ids.get(key) != self.alias_ids.get(key)
+        let id = self.ids.get(key);
+        self.has_photo(key) && id != self.alias_ids.get(key) && id != self.stand_in_ids.get(key)
+    }
+    /// Light's own id of the Smart Preview stand-in for `key`, as of the last snapshot.
+    pub fn stand_in_id(&self, key: &str) -> Option<u64> {
+        self.stand_in_ids.get(key).copied()
+    }
+    /// Light's own id of the photo shown for `key`, as of the last snapshot.
+    pub fn id_of(&self, key: &str) -> Option<u64> {
+        self.ids.get(key.rsplit_once('#').map(|(b, _)| b).unwrap_or(key)).copied()
+    }
+    /// Write photo `key`'s Smart Preview (.lcsp, with the facts another Light needs) to `path`.
+    pub fn export_smart_preview(&mut self, key: &str, path: &str) -> Result<Value> {
+        let id = self.id_for(key)?;
+        self.t.exec("photo.exportSmartPreview", json!({"id": id, "path": path}))
+    }
+    /// Show a teammate's Smart Preview as photo `key` (the original's content hash in Light).
+    pub fn add_smart_preview(&mut self, path: &str, key: &str, file_name: &str) -> Result<Value> {
+        let mut p = json!({"smartPreview": path, "contentHash": key});
+        if !file_name.is_empty() {
+            p["fileName"] = json!(file_name);
+        }
+        self.t.exec("library.addFromSmartPreview", p)
     }
     /// The file on this computer whose BLAKE3 is `hash`, if Light has imported it.
     pub fn original_path(&self, hash: &str) -> Option<String> {
@@ -308,18 +353,33 @@ impl Connector for LightConnector {
         let mut out = BTreeMap::new();
         self.ids.clear();
         self.alias_ids.clear();
+        self.stand_in_ids.clear();
         let keys: Vec<_> = resolve_keys(&photos, &self.previews, self.preview_dir.as_deref()).into_iter().map(|k| k.map(|(k, a)| (k, a.cloned()))).collect();
-        for (p, k) in photos.iter().zip(keys) {
+        // the original wins over a Smart Preview stand-in of the same photo
+        let native: std::collections::BTreeSet<&String> = photos.iter().zip(&keys).filter(|(p, _)| !is_stand_in(p)).filter_map(|(_, k)| k.as_ref().map(|(k, _)| k)).collect();
+        for (p, k) in photos.iter().zip(keys.iter().cloned()) {
             let Some(id) = p.get("id").and_then(Value::as_u64) else { continue };
             if let Some(a) = self.preview_alias_of(p) {
                 self.alias_ids.insert(a.key.clone(), id);
             }
             let Some((key, alias)) = k else { continue };
-            self.ids.insert(key.clone(), id);
-            let assets = match alias {
-                Some(a) => a.assets,
-                None => self.original(p)?,
+            let assets = if is_stand_in(p) {
+                let base = key.rsplit_once('#').map(|(b, _)| b).unwrap_or(&key).to_string();
+                if !key.contains('#') {
+                    self.stand_in_ids.insert(base.clone(), id);
+                }
+                // not ours to publish: kopanod did not put it there, or its original is in Light
+                match self.stand_ins.get(&base) {
+                    Some(a) if !native.contains(&key) => a.clone(),
+                    _ => continue,
+                }
+            } else {
+                match alias {
+                    Some(a) => a.assets,
+                    None => self.original(p)?,
+                }
             };
+            self.ids.insert(key.clone(), id);
             let mut meta = serde_json::Map::new();
             for (f, _) in META {
                 if let Some(v) = p.pointer(&format!("/meta/{f}")) {
@@ -370,6 +430,9 @@ impl Connector for LightConnector {
                 }
             }
             "light.meta" => {
+                // Light only runs photo.setMeta with a selection, even when `ids` is given (a photo
+                // added from a Smart Preview is not selected the way an import is)
+                self.t.exec("library.select", json!({"ids": ids, "active": id}))?;
                 let mut p = serde_json::Map::new();
                 p.insert("ids".into(), ids);
                 for (from, to) in META {
@@ -418,8 +481,8 @@ impl Harness for LightConnector {
 /// orientation stays as shot so the project's orientation setting turns it the same way there.
 /// Measured against the RAW in the same Light (1280 px, mean difference out of 255): as shot
 /// 0.8, contrast +50 1.0, white balance 4000 K 2.0-2.3, but exposure +-2 15-36 and
-/// highlights/shadows 27-31: a picture to work on, not to judge tones on. The fix needs Light to
-/// take its own Smart Preview in (E13: within 0.5).
+/// highlights/shadows 27-31: a picture to work on, not to judge tones on. kopanod uses it only
+/// for a Light without `photo.exportSmartPreview`; Smart Previews stay within about 1.5.
 pub fn make_preview(cli: &str, original: &std::path::Path, out: &std::path::Path) -> Result<()> {
     let settings = out.with_extension("settings.json");
     std::fs::write(&settings, json!({"detail": {"sharpen_amount": 0.0, "nr_color": 0.0}, "orientation": "Normal"}).to_string())?;
@@ -481,6 +544,18 @@ mod tests {
         let k = resolve_keys(&photos, &previews, Some("/k/p"));
         assert!(k[0].is_none(), "the preview stands down once the original is in Light");
         assert_eq!(k[1].as_ref().map(|(k, a)| (k.as_str(), a.is_none())), Some(("e21e378d", true)));
+    }
+
+    #[test]
+    fn stand_ins_and_older_lights_are_recognised() {
+        assert!(is_stand_in(&json!({"source": {"type": "file", "path": "smart-preview:/e21e378d/DSC08379.ARW"}})));
+        assert!(!is_stand_in(&json!({"source": {"type": "file", "path": "T:/p/DSC08379.ARW"}})));
+        assert!(lacks_command(&anyhow::anyhow!("Light could not run photo.exportSmartPreview: unknown command `photo.exportSmartPreview`")));
+        assert!(!lacks_command(&anyhow::anyhow!("Light could not run photo.exportSmartPreview: no such photo")));
+        // a stand-in is a photo kopanod keys by the original's content hash itself (no alias)
+        let (none, photos) = (BTreeMap::new(), [photo(1, "smart-preview:/e21e378d/DSC08379.ARW", "e21e378d", None)]);
+        let k = resolve_keys(&photos, &none, Some("/k/p"));
+        assert_eq!(k[0].as_ref().map(|(k, a)| (k.as_str(), a.is_none())), Some(("e21e378d", true)));
     }
 
     #[test]
