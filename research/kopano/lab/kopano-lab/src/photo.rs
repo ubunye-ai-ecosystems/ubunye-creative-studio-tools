@@ -50,7 +50,7 @@ const STAGE_BATCH: usize = 600 << 10;
 
 pub enum Transport {
     Lines { child: Child, stdin: ChildStdin, stdout: BufReader<ChildStdout>, next: u64 },
-    Tcp { reader: BufReader<std::net::TcpStream>, writer: std::net::TcpStream, next: u64 },
+    Tcp { reader: BufReader<std::net::TcpStream>, writer: std::net::TcpStream, next: u64, port: u16, token: String, last: std::time::Instant },
 }
 
 impl Transport {
@@ -71,16 +71,45 @@ impl Transport {
     /// The running desktop app's control port; `token` is the content of its control token file.
     pub fn control(port: u16, token: &str) -> Result<Self> {
         let s = std::net::TcpStream::connect(("127.0.0.1", port)).with_context(|| format!("Ubunye Photo is not listening on control port {port}"))?;
-        let mut t = Transport::Tcp { reader: BufReader::new(s.try_clone()?), writer: s, next: 0 };
+        // a window that hangs must not hold the caller forever (big imports take a few seconds)
+        s.set_read_timeout(Some(std::time::Duration::from_secs(90)))?;
+        let mut t = Transport::Tcp { reader: BufReader::new(s.try_clone()?), writer: s, next: 0, port, token: token.trim().to_string(), last: std::time::Instant::now() };
         t.call("auth", json!({"token": token.trim()})).context("Photo refused the control token")?;
         Ok(t)
     }
 
+    /// Photo closes a control connection that was quiet for 30 s. Before such a connection is
+    /// used again it is opened again (the request was never read, so nothing runs twice).
+    fn fresh_if_idle(&mut self) -> Result<()> {
+        if let Transport::Tcp { port, token, last, .. } = self {
+            if last.elapsed() > std::time::Duration::from_secs(20) {
+                let (port, token) = (*port, token.clone());
+                *self = Transport::control(port, &token)?;
+            }
+        }
+        Ok(())
+    }
+
     /// One request, one reply (same envelope on stdio and TCP).
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        if method != "auth" {
+            self.fresh_if_idle()?;
+        }
+        if let Transport::Tcp { last, .. } = self {
+            *last = std::time::Instant::now();
+        }
+        let t0 = std::time::Instant::now();
+        let r = self.call_once(method, params);
+        if t0.elapsed() > std::time::Duration::from_millis(1500) {
+            eprintln!("[photo] {method} took {} ms", t0.elapsed().as_millis());
+        }
+        r
+    }
+
+    fn call_once(&mut self, method: &str, params: Value) -> Result<Value> {
         let (w, r, next): (&mut dyn Write, &mut dyn BufRead, &mut u64) = match self {
             Transport::Lines { stdin, stdout, next, .. } => (stdin, stdout, next),
-            Transport::Tcp { reader, writer, next } => (writer, reader, next),
+            Transport::Tcp { reader, writer, next, .. } => (writer, reader, next),
         };
         *next += 1;
         let id = *next;
@@ -130,6 +159,23 @@ pub struct Traffic {
     pub staged_objects: u64,
     pub staged_zstd_bytes: u64,
     pub updates: u64,
+}
+
+/// Photo refused an update because its document changed since the snapshot the update was built
+/// on (someone edited in the window meanwhile). The caller saves that edit and tries again.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Photo refused the update: {}", self.0)
+    }
+}
+impl std::error::Error for Refused {}
+
+/// Is this error (or anything it wraps) a `Refused`?
+pub fn is_refused(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<Refused>().is_some())
 }
 
 pub struct PhotoConnector {
@@ -277,8 +323,26 @@ impl PhotoConnector {
         hex16(&["photo-layer-new", name, &now.to_string(), &std::process::id().to_string(), &self.mint.to_string(), &rand::random::<u64>().to_string()])
     }
 
-    /// Ask Photo for its document and rebuild the items from it.
+    /// Ask Photo for its document and rebuild the items from it. If the document changes between
+    /// the export and the object fetch (someone is painting), the fetch can miss a tile that the
+    /// newer document no longer has: export again.
     fn load(&mut self) -> Result<()> {
+        let mut tries = 0;
+        loop {
+            match self.load_once() {
+                Err(e) if tries < 12 && format!("{e:#}").contains("Photo has no object") => {
+                    // straight away first: the export and the fetch are quick, a stroke is not
+                    tries += 1;
+                    if tries > 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(40 * tries));
+                    }
+                }
+                r => return r,
+            }
+        }
+    }
+
+    fn load_once(&mut self) -> Result<()> {
         let r = self.t.exec("kopano.export", json!({}))?;
         let manifest = r.get("manifest").cloned().context("Photo sent no manifest")?;
         let doc = manifest.get("document").context("manifest has no document")?;
@@ -465,7 +529,13 @@ impl PhotoConnector {
         }
         // Refused when someone edited the document since the snapshot this update builds on; the
         // caller saves that edit and brings the changes in again.
-        self.t.exec("kopano.import", json!({"manifest": manifest, "revision": self.revision})).context("Photo refused the update")?;
+        if let Err(e) = self.t.exec("kopano.import", json!({"manifest": manifest, "revision": self.revision})) {
+            let msg = format!("{e:#}");
+            if msg.contains("changed since revision") {
+                return Err(Refused(msg).into());
+            }
+            return Err(e.context("Photo refused the update"));
+        }
         self.traffic.updates += 1;
         self.dirty = false;
         self.loaded = false;
@@ -574,6 +644,33 @@ impl PhotoConnector {
             l["content"]["children"] = Value::Array(kids);
         }
         Ok(Some(l))
+    }
+
+    /// Forget changes not yet sent and read Photo's document again on next use (after Photo
+    /// refused an update, or before the connection is dropped, so nothing half-applied is sent).
+    pub fn discard(&mut self) {
+        self.dirty = false;
+        self.loaded = false;
+    }
+
+    /// The item Photo holds under `key` (last snapshot, with applied changes on top).
+    pub fn item(&self, key: &str) -> Option<&Item> {
+        self.items.get(key)
+    }
+
+    /// Every key Photo holds (last snapshot, with applied changes on top).
+    pub fn keys(&self) -> Vec<String> {
+        self.items.keys().cloned().collect()
+    }
+
+    /// The folder holding the tiles and blobs this connector reads and writes (`<blake3>` files).
+    pub fn media_dir(&self) -> &Path {
+        &self.media
+    }
+
+    /// Every media hash the items name.
+    pub fn asset_hashes(&self) -> BTreeSet<String> {
+        self.items.values().flat_map(|i| i.assets.iter().map(|a| a.hash.clone())).collect()
     }
 
     fn ensure_loaded(&mut self) -> Result<()> {

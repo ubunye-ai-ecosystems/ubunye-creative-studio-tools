@@ -8,6 +8,9 @@ import json, os, socket, subprocess, sys, threading, time
 
 K, A, B, BID = sys.argv[1:5]
 N = int(sys.argv[sys.argv.index('--edits') + 1]) if '--edits' in sys.argv else 20
+# homes kept from an earlier run already hold this run's values (a set to the same value saves
+# nothing): --offset shifts every value so the run edits for real
+OFF = float(sys.argv[sys.argv.index('--offset') + 1]) if '--offset' in sys.argv else 0.0
 BASE = int(sys.argv[sys.argv.index('--port-base') + 1]) if '--port-base' in sys.argv else 47100
 PORT = {A: BASE + 1, B: BASE + 2}
 res = {}
@@ -100,7 +103,7 @@ try:
     for i in range(N):
         eb.clear()
         t0 = time.time()
-        v = call(A, op='set', project=pid, key=keys[i % len(keys)], field='develop.exposure', value=round(0.1 * (i + 1), 2))['version']
+        v = call(A, op='set', project=pid, key=keys[i % len(keys)], field='develop.exposure', value=round(0.1 * (i + 1) + OFF, 2))['version']
         t, e = eb.wait(lambda e: e.get('event') == 'synced', 10)
         lat.append(round((t - t0) * 1000) if t else None)
     ok = [x for x in lat if x is not None]
@@ -109,7 +112,7 @@ try:
     # 2. B -> A
     ea.clear()
     t0 = time.time()
-    call(B, op='set', project=pid, key=keys[0], field='develop.contrast', value=25)
+    call(B, op='set', project=pid, key=keys[0], field='develop.contrast', value=25 + OFF)
     t, e = ea.wait(lambda e: e.get('event') == 'synced', 10)
     res['b_to_a_ms'] = round((t - t0) * 1000) if t else None
 
@@ -135,7 +138,7 @@ try:
     # 4. B stops; A edits 5 times; B comes back and must catch up by itself
     pb.terminate(); pb.wait()
     for i in range(5):
-        call(A, op='set', project=pid, key=keys[4], field='develop.exposure', value=0.5 + i)
+        call(A, op='set', project=pid, key=keys[4], field='develop.exposure', value=0.5 + i + OFF)
     want = call(A, op='status', project=pid)['head']
     pb = start(B)
     end, got = time.time() + 90, None

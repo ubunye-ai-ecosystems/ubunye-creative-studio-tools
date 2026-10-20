@@ -18,6 +18,7 @@
 #[path = "../../kopano-lab/src/keystore.rs"]
 pub mod keystore;
 pub mod media;
+pub mod photo_binding;
 pub mod unlinked;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -78,6 +79,8 @@ pub struct Proj {
     light: std::sync::Mutex<Option<LightConnector>>,
     /// the node's media (set when the node starts): where preview files live
     media: std::sync::OnceLock<Arc<media::Media>>,
+    /// a Photo window bound to this project (photo_binding.rs)
+    photo: photo_binding::Slot,
 }
 
 /// Which app holds this project's items on this device.
@@ -90,6 +93,20 @@ pub enum Binding {
     LightControl { port: u16 },
     /// a headless Light engine with the demo library (automated tests)
     LightHeadless { cli: String },
+    /// the running Ubunye Photo app (`photocraft --control PORT --control-token-file FILE`);
+    /// tiles live in `media_dir` (default: the project's `photo-media` folder). photo_binding.rs
+    PhotoControl {
+        port: u16,
+        token_file: String,
+        #[serde(default)]
+        media_dir: Option<String>,
+    },
+    /// a headless Photo engine with the demo document (automated tests)
+    PhotoHeadless {
+        cli: String,
+        #[serde(default)]
+        media_dir: Option<String>,
+    },
 }
 
 impl Proj {
@@ -109,6 +126,7 @@ impl Proj {
             binding: std::sync::Mutex::new(std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy)),
             light: Default::default(),
             media: Default::default(),
+            photo: Default::default(),
         })
     }
     /// Run `f` against this project's app: the toy editor file, or Light (connected on first use
@@ -121,6 +139,7 @@ impl Proj {
                 self.save_app(&app)?;
                 Ok(r)
             }),
+            b if b.is_photo() => photo_binding::with_photo(self, dev, f),
             // media.rs: photos whose preview is still on its way count as the project's state
             _ => self.with_light(dev, |c| f(&mut media::View::new(&self.store, self.head(), c))),
         }
@@ -135,7 +154,7 @@ impl Proj {
                 let mut c = match &binding {
                     Binding::LightControl { port } => LightConnector::live(*port).context("Light is not running with its control port")?,
                     Binding::LightHeadless { cli } => LightConnector::headless(cli)?,
-                    Binding::Toy => unreachable_toy()?,
+                    _ => unreachable_toy()?,
                 };
                 media::prepare(self.media.get(), self, &mut c);
                 self.reconcile(dev, &mut media::View::new(&self.store, self.head(), &mut c))?;
@@ -195,6 +214,7 @@ impl Proj {
         std::fs::write(self.dir.join("binding.json"), serde_json::to_vec(&b)?)?;
         *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = b;
         *self.light.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.photo.reset();
         Ok(())
     }
     /// How many photos (items before the `#lane`) differ between two versions.
@@ -458,14 +478,42 @@ impl Node {
                 }
             }
         }
-        let mut repo = p.repo(&self.device)?;
-        let r = p.with_app(&self.device, |app| repo.integrate(app, &theirs))?;
-        p.set_head(repo.head)?;
+        // Our own head coming back (a teammate fast-forwarded to it and pushes it on), or one we
+        // already contain: nothing to bring in, so the app is not touched. Going through
+        // Repo::integrate here would first save the app's newest edit into the head without
+        // telling anyone (S6 found a slider change that then waited ~30 s for the next edit).
+        if let Some(m) = mine {
+            if m == theirs || project::is_ancestor(&p.store, &theirs, &m)? {
+                return Ok(None);
+            }
+        }
+        // Photo refuses an update when the user edited the document meanwhile: try again, and
+        // the next try's first step saves that edit (photo_binding.rs)
+        let mut tries = 0;
+        let (repo_head, r) = loop {
+            let mut repo = p.repo(&self.device)?;
+            match p.with_app(&self.device, |app| repo.integrate(app, &theirs)) {
+                Err(e) if tries < 8 && kopano_lab::photo::is_refused(&e) => {
+                    tries += 1;
+                    eprintln!("[kopanod] {}: the app was edited while changes came in; trying again ({tries})", p.project.id.short());
+                    tokio::task::block_in_place(|| std::thread::sleep(Duration::from_millis(100 * tries)));
+                }
+                r => break (repo.head, r?),
+            }
+        };
+        p.set_head(repo_head)?;
         p.store.flush()?;
         Ok(match r {
+            // the save before bringing in moved the head: it must still be pushed
+            Integrated::AlreadyHad if repo_head != mine => Some(("saved an edit made meanwhile", 0)),
             Integrated::AlreadyHad => None,
             Integrated::FastForward { .. } => Some(("fast-forward", 0)),
-            Integrated::Merged { conflicts, .. } => Some(("merged", conflicts.len())),
+            Integrated::Merged { conflicts, .. } => {
+                if !conflicts.is_empty() {
+                    eprintln!("[kopanod] {}: clashes kept for review: {}", p.project.id.short(), conflicts.iter().take(6).map(|c| format!("{} [{}]", c.key, c.fields.join(", "))).collect::<Vec<_>>().join("; "));
+                }
+                Some(("merged", conflicts.len()))
+            }
         })
     }
 
@@ -503,7 +551,11 @@ impl Node {
         if let Some(m) = self.media.get() {
             let _ = p.media.set(m.clone());
         }
-        media::spawn(self.clone(), p.clone());
+        if p.binding().is_photo() {
+            photo_binding::start(self, &p);
+        } else {
+            media::spawn(self.clone(), p.clone());
+        }
         let node = self.clone();
         tokio::spawn(async move {
             loop {
@@ -518,7 +570,7 @@ impl Node {
                     (|| -> Result<Option<usize>> {
                         let before = p.head();
                         let mut repo = p.repo(&node.device)?;
-                        let v = p.with_app(&node.device, |app| repo.save(app, "Edit in Light"))?;
+                        let v = p.with_app(&node.device, |app| repo.save(app, p.binding().edit_message()))?;
                         if v.is_some() {
                             p.set_head(repo.head)?;
                         }
@@ -981,7 +1033,7 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
 
 /// The token apps must show. Created once, readable by this user only (a file next to the key).
 fn unreachable_toy() -> Result<LightConnector> {
-    bail!("toy binding has no Light connection")
+    bail!("this project is not bound to Light")
 }
 
 pub fn api_token(home: &Path) -> Result<String> {

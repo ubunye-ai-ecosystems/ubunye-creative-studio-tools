@@ -271,7 +271,7 @@ fn refs(m: &Media, p: &Proj) -> HashSet<String> {
 pub fn may_fetch(node: &Node, device: &[u8; 32], hash: &str) -> bool {
     let (dev, Some(m)) = (hex::encode(device), node.media.get()) else { return false };
     let ps: Vec<Arc<Proj>> = node.projects.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-    ps.iter().any(|p| member_device(p, &dev) && refs(m, p).contains(hash))
+    ps.iter().any(|p| member_device(p, &dev) && (refs(m, p).contains(hash) || crate::photo_binding::serves(p, hash)))
 }
 
 /// iroh-blobs hook: refuse strangers at connect, and check every request against the projects.
@@ -489,7 +489,7 @@ async fn fetch(node: &Node, device: &str, hash: &str, mut progress: impl FnMut(u
 }
 
 /// Teammates online now, the project owner's devices first (they hold the originals).
-fn sources(p: &Proj) -> Vec<String> {
+pub(crate) fn sources(p: &Proj) -> Vec<String> {
     let names = p.names();
     let owner = &p.project.genesis.owner;
     let mut v: Vec<String> = p.online().into_keys().collect();
@@ -787,7 +787,7 @@ async fn get_original(node: &Arc<Node>, p: &Arc<Proj>, key: &str, a: &AssetRef) 
 pub fn status(node: &Arc<Node>, p: &Arc<Proj>) -> Result<Value> {
     let originals = originals_in(&p.store, p.head())?;
     let (mut from_original, mut from_preview, mut waiting) = (0, 0, Vec::new());
-    if p.binding() != Binding::Toy {
+    if p.binding() != Binding::Toy && !p.binding().is_photo() {
         p.with_light(&node.device, |c| {
             c.snapshot()?;
             for k in originals.keys() {

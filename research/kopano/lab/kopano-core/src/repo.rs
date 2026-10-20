@@ -164,20 +164,26 @@ impl<'a> Repo<'a> {
             self.head = Some(*theirs);
             return Ok(Integrated::FastForward { applied });
         }
-        let base = project::common_ancestor(self.store, &mine, theirs)?;
-        let base_tree = match base {
-            Some(b) => project::load_version(self.store, &b)?.tree()?,
-            None => None,
-        };
         let info = conn.info();
         let policy = |k: &str| info.mergeable(k);
-        let out = merge::merge_trees(
-            self.store,
-            base_tree,
-            self.head_tree()?,
-            project::load_version(self.store, theirs)?.tree()?,
-            &policy,
-        )?;
+        // after a criss-cross there is more than one best common ancestor: keep the merge with
+        // the fewest clashes (project::merge_bases)
+        let mut bases: Vec<Option<Id>> = project::merge_bases(self.store, &mine, theirs, 4)?.into_iter().map(Some).collect();
+        if bases.is_empty() {
+            bases.push(None);
+        }
+        let mut best: Option<merge::MergeOutcome> = None;
+        for b in bases {
+            let base_tree = match b {
+                Some(b) => project::load_version(self.store, &b)?.tree()?,
+                None => None,
+            };
+            let out = merge::merge_trees(self.store, base_tree, self.head_tree()?, project::load_version(self.store, theirs)?.tree()?, &policy)?;
+            if best.as_ref().map_or(true, |o| out.conflicts.len() < o.conflicts.len()) {
+                best = Some(out);
+            }
+        }
+        let out = best.expect("at least one base");
         let applied = self.apply_tree(conn, out.root)?;
         let msg = if out.conflicts.is_empty() {
             "Merged".to_string()
@@ -241,4 +247,73 @@ pub fn copy_version_closure(from: &dyn ObjectStore, to: &dyn ObjectStore, head: 
         }
     }
     Ok((n, bytes))
+}
+
+#[cfg(test)]
+mod criss_cross {
+    use super::*;
+    use crate::connector::{ConnectorInfo, KindInfo, CONTRACT_VERSION};
+    use crate::identity::{DeviceKey, Provider};
+    use crate::project::{Member, Role};
+    use crate::store::MemStore;
+    use serde_json::json;
+
+    /// Items that can only be taken whole (like a Photo tile).
+    struct Tiles(BTreeMap<String, Item>);
+    impl Connector for Tiles {
+        fn info(&self) -> ConnectorInfo {
+            ConnectorInfo { app: "t".into(), contract: CONTRACT_VERSION, kinds: vec![KindInfo { kind: "t.tile".into(), lane: "l".into(), schema: 1, mergeable: false }] }
+        }
+        fn snapshot(&mut self) -> Result<BTreeMap<String, Item>> {
+            Ok(self.0.clone())
+        }
+        fn apply(&mut self, key: &str, item: Option<&Item>) -> Result<()> {
+            match item {
+                Some(i) => self.0.insert(key.into(), i.clone()),
+                None => self.0.remove(key),
+            };
+            Ok(())
+        }
+    }
+    fn tile(v: &str) -> Item {
+        Item { kind: "t.tile".into(), lane: "l".into(), schema: 1, state: json!({"hash": v}), assets: vec![] }
+    }
+
+    /// Both people merge each other's work at the same moment, then one paints again. Bringing
+    /// that in must not report the shared work as a clash (S6: 10 false tile clashes).
+    #[test]
+    fn a_criss_cross_merge_does_not_clash_on_shared_work() -> Result<()> {
+        let store = MemStore::default();
+        let provider = Provider::generate();
+        let (ka, kb) = (DeviceKey::generate(), DeviceKey::generate());
+        let ca = provider.issue("alice", "Alice", &ka, "t", 3_600_000)?;
+        let cb = provider.issue("bob", "Bob", &kb, "t", 3_600_000)?;
+        let members = BTreeMap::from([("bob".to_string(), Member { role: Role::Editor, lanes: vec![] })]);
+        let p = Project::create(&store, "x", vec![provider.public_hex()], &ca, &ka, members)?;
+        let start = BTreeMap::from([("t".to_string(), tile("a")), ("x".to_string(), tile("a"))]);
+        let mut a = Tiles(start.clone());
+        let mut ra = Repo { store: &store, project: Project::load(&store, &p.id)?, head: None, cert: ca, key: ka };
+        let v0 = ra.save(&mut a, "start")?.unwrap();
+        let mut b = Tiles(start);
+        let mut rb = Repo { store: &store, project: Project::load(&store, &p.id)?, head: Some(v0), cert: cb, key: kb };
+        a.0.insert("x".into(), tile("x1"));
+        let a1 = ra.save(&mut a, "alice paints x")?.unwrap();
+        b.0.insert("t".into(), tile("b1"));
+        let b1 = rb.save(&mut b, "bob paints t")?.unwrap();
+        // at the same moment: Alice brings in B1; Bob paints t again and brings in A1
+        assert!(matches!(ra.integrate(&mut a, &b1)?, Integrated::Merged { .. }));
+        b.0.insert("t".into(), tile("b2"));
+        let mb = match rb.integrate(&mut b, &a1)? {
+            Integrated::Merged { version, .. } => version,
+            _ => panic!("expected a merge"),
+        };
+        match ra.integrate(&mut a, &mb)? {
+            Integrated::Merged { conflicts, .. } => assert!(conflicts.is_empty(), "false clashes: {:?}", conflicts.iter().map(|c| &c.key).collect::<Vec<_>>()),
+            Integrated::FastForward { .. } => {}
+            Integrated::AlreadyHad => panic!("Bob's second stroke was not brought in"),
+        }
+        assert_eq!(a.0["t"], tile("b2"));
+        assert_eq!(a.0["x"], tile("x1"));
+        Ok(())
+    }
 }

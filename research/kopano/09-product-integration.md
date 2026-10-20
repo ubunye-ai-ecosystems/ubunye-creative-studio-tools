@@ -144,3 +144,87 @@ channel, kopanod with the S4 changes merged; screenshots in T:/kopano-lab/media/
 4. `photo.relink` keeps the old kind and format (a JPEG relinked to an ARW stays "image"), which is
    why the original is imported beside the preview instead of relinked.
 
+
+## 7. Slice "photo": Ubunye Photo windows co-edit through kopanod
+
+Before this slice the Photo connector (`kopano-lab/src/photo.rs`) only worked in a lab proof that
+moved versions and tiles by hand. Now a running Photo window is bound to a project in kopanod like
+Light is. Code: `lab/kopano-node/src/photo_binding.rs` (kept apart from `lib.rs` so the Film
+binding can merge beside it); test: `lab/scenarios/s6_photo.py`.
+
+**How it works**
+
+1. Binding: `{"kind": "photo-control", "port": P, "token_file": F, "media_dir": optional}` in
+   `create-project`, `join` and `attach`. The token file is read on every connect, because Photo
+   writes a new token each launch. `photo-headless {cli}` binds a headless engine for tests.
+2. Tiles are media. A tile item names its pixels by BLAKE3, which is also the iroh-blobs hash.
+   Before a version is pushed, every tile and blob its items name is put in kopanod's media store
+   (by reference, no second copy). A teammate fetches missing tiles over iroh-blobs through the
+   same gate as Light media: only a current member's device, only hashes the project's versions
+   name. Tiles are fetched 16 at a time on one connection, into memory and straight into the
+   media folder (the file store synced the disk once per blob: 97 tiles took 9 to 55 s on this
+   PC's hard disk; in memory 0.25 to 0.8 s).
+3. A tile waiting for its pixels is not "undone". Until the pixels are here the window keeps the
+   old tile, but saves see the project's tile, so nothing is sent back to the team. If the user
+   repaints that tile meanwhile, the user's stroke wins.
+4. One update per call. After every call the window gets one `kopano.import` (one undo step in
+   Photo). If Photo refuses it because the user edited meanwhile, nothing half-applied is sent,
+   and kopanod saves the user's edit and brings the team's change in again (up to 8 tries).
+5. A window that (re)connects is brought to the project first (the S3b data-loss class). Its own
+   state is kept as a version off the main line (`kept.json`), the project's items are applied
+   and items the project does not have are taken out. A window that joins a project with no
+   versions on this device yet says nothing until the first push, then becomes exactly the
+   team's document. Only a lost connection reconnects; any other Photo error keeps the
+   connection, so the user's unsaved edits are not moved off the main line.
+
+**Two fixes outside Photo that this slice found (they help Light too)**
+
+- `Node::integrate`: our own head coming back from a teammate went through `Repo::integrate`,
+  whose first step saved the app's newest edit into the head without pushing it. A slider change
+  then waited about 30 s for the next edit. Now a head we already contain is ignored, and a head
+  moved by that first save is pushed.
+- `Repo::integrate` (kopano-core): after a criss-cross (both sides merged each other at the same
+  moment) there are two best common ancestors; the old breadth-first pick took the wrong one and
+  reported work both sides already shared as clashes. S6 saw 10 false tile clashes per run. Now
+  every best common ancestor (`project::merge_bases`) is tried and the merge with the fewest
+  clashes is kept; the lane check of a merge accepts any of them. Test:
+  `repo::criss_cross` (fails with the old pick).
+
+**Real test (2026-10-20, this PC, two Photo windows, two kopanod with their own homes and API
+ports, the owner's DSC08379 as a 3000x2000 document; screenshots in
+T:/kopano-lab/photo-kopanod/side-by-side)**
+
+| Step | Result |
+|---|---|
+| Alice starts the project from her window | 98 items (96 tiles), 2.4 s |
+| Member1's window starts on a blank 800x600 document and joins | became Alice's document 1.7 s after the join returned; 97 tiles fetched in 0.25 s |
+| Alice adds an Exposure layer, moves its slider | Member1 follows in 1.6 s and 1.5 s |
+| Alice adds a layer, paints one stroke (4 tiles of 100) | 1.6 s, 1.1 s |
+| Member1 paints a stroke | Alice follows in 1.4 s |
+| Both paint at once, different tiles of one layer | settled in 2.3 s, 0 clashes |
+| Member1 paints 207 strokes while Alice moves Exposure 4 times | settled in 1.9 s, 0 of Member1's tiles lost, Exposure -0.4 in both |
+| Member1's Photo is closed and opened again on the untouched original | team edits back in 3.9 s; Alice's window and head unchanged; the window's own state kept as 1 version |
+| The reopened window paints | Alice follows in 2.4 s |
+| End | same head, windows match, 0 clashes, 0 media refusals |
+
+One earlier run hit the refused-update path once (Photo refused, kopanod saved the stroke and
+tried again; windows matched). Regressions: kopano-node unit tests 11/11 (5 new), kopano-core
+9/9 plus 3 (1 new), S1 20/20 edits both ways, concurrent edits settle, restart catch-up
+(median 953 ms on a loaded PC; the build before this slice measured 935 ms in the same
+conditions).
+
+**Limits found (honest)**
+
+- Tiles travel raw (a 256x256 RGBA tile is 256 KB); Photo's own bundle keeps them zstd. A join
+  of this document moves about 25 MB, fine on a LAN, slow over a relay. Compressed tile blobs
+  would need a second hash per tile.
+- Photo's `kopano.objects` serves the latest export only, so while someone paints fast an
+  export and its object fetch can disagree ("Photo has no object"). The connector exports again
+  (up to 12 times); under 40 strokes a second a save can still be put off a few seconds. A fix
+  in Photo: let `kopano.objects` also serve the previous export.
+- kopanod restarting while Photo stays open treats the open window like a fresh one: edits made
+  while kopanod was down go to `kept.json`, not to the team.
+- The document's tab name and file name stay local ("Blank" in Member1's window).
+- Layers made in a window before any update from the team get random uids that the window does
+  not store (only an update writes the uid map into the document); a reconnect then sees them as
+  new layers, keeps the old ones in `kept.json` and brings the project's back.

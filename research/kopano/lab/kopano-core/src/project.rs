@@ -249,13 +249,23 @@ fn mechanical_merge(store: &dyn ObjectStore, parents: &[Id], other_tree: Option<
     if mi.kind != ti.kind || mi.lane != ti.lane || mi.schema != ti.schema || ai.kind != mi.kind || ai.lane != mi.lane {
         return Ok(false);
     }
-    let base_tree = match common_ancestor(store, &parents[0], &parents[1])? {
-        Some(b) => load_version(store, &b)?.tree()?,
-        None => None,
-    };
-    let bi = tree::get(store, base_tree, key)?.map(|b| Item::get(store, &b)).transpose()?;
-    let (state, _) = crate::jsonmerge::merge3(bi.as_ref().map(|i| &i.state), &mi.state, &ti.state);
-    Ok(state == ai.state && (ai.assets == mi.assets || ai.assets == ti.assets))
+    // the merge may have used any of the best common ancestors (merge_bases)
+    let mut bases: Vec<Option<Id>> = merge_bases(store, &parents[0], &parents[1], 4)?.into_iter().map(Some).collect();
+    if bases.is_empty() {
+        bases.push(None);
+    }
+    for b in bases {
+        let base_tree = match b {
+            Some(b) => load_version(store, &b)?.tree()?,
+            None => None,
+        };
+        let bi = tree::get(store, base_tree, key)?.map(|b| Item::get(store, &b)).transpose()?;
+        let (state, _) = crate::jsonmerge::merge3(bi.as_ref().map(|i| &i.state), &mi.state, &ti.state);
+        if state == ai.state && (ai.assets == mi.assets || ai.assets == ti.assets) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// All versions reachable from `heads`, newest first by time.
@@ -277,6 +287,44 @@ pub fn history(store: &dyn ObjectStore, heads: &[Id]) -> Result<Vec<(Id, Version
 
 pub fn is_ancestor(store: &dyn ObjectStore, maybe_ancestor: &Id, of: &Id) -> Result<bool> {
     Ok(history(store, &[*of])?.iter().any(|(id, _)| id == maybe_ancestor))
+}
+
+/// The best common ancestors of two versions: every common ancestor that is not itself an
+/// ancestor of another one (at most `max`, newest first). After a criss-cross (two people merged
+/// each other's work at the same moment) there are two, and merging against the wrong one reads
+/// work both sides already share as "changed on both sides": a clash for an item that cannot be
+/// merged setting by setting, such as a Photo tile (S6). Callers try each and keep the merge
+/// with the fewest clashes.
+pub fn merge_bases(store: &dyn ObjectStore, a: &Id, b: &Id, max: usize) -> Result<Vec<Id>> {
+    let ha = history(store, &[*a])?;
+    let anc: BTreeSet<Id> = ha.iter().map(|(id, _)| *id).collect();
+    let common: Vec<(Id, Version)> = history(store, &[*b])?.into_iter().filter(|(id, _)| anc.contains(id)).collect();
+    let ids: BTreeSet<Id> = common.iter().map(|(id, _)| *id).collect();
+    // an ancestor of another common ancestor is not a best one
+    let mut below: BTreeSet<Id> = BTreeSet::new();
+    for (_, v) in &common {
+        let mut q: VecDeque<Id> = v.parents()?.into_iter().collect();
+        while let Some(id) = q.pop_front() {
+            if ids.contains(&id) && below.insert(id) {
+                q.extend(load_version(store, &id)?.parents()?);
+            }
+        }
+    }
+    let mut out: Vec<Id> = Vec::new();
+    if let Some(first) = common_ancestor(store, a, b)? {
+        if !below.contains(&first) {
+            out.push(first);
+        }
+    }
+    for (id, _) in &common {
+        if out.len() >= max {
+            break;
+        }
+        if !below.contains(id) && !out.contains(id) {
+            out.push(*id);
+        }
+    }
+    Ok(out)
 }
 
 /// Nearest common ancestor of two versions (breadth first from `b`).
