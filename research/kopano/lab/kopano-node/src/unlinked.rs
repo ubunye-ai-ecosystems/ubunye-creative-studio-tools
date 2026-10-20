@@ -24,7 +24,7 @@ pub fn hello(device: &str) -> Value {
 pub fn reply(device: &str, req: &Value) -> Value {
     match req.get("op").and_then(Value::as_str) {
         Some("hello") => json!({"ok": true, "result": hello(device)}),
-        _ => json!({"ok": false, "error": "this computer is not signed in to ThabangVision yet"}),
+        _ => json!({"ok": false, "error": "This computer is not signed in to ThabangVision yet."}),
     }
 }
 
