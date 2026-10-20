@@ -232,6 +232,24 @@ try:
     res['after_swap_a_to_b_ms'] = wait_for(lambda: abs((lb.develop(idb).get('light', {}).get('exposure') or 0) - 0.5) < 1e-6, 30)
     time.sleep(1.5)
     shots('6-edit-on-original', '6. Alice changes exposure to +0.5: Member1\'s original follows.')
+    # the gate: a device with a valid certificate from the same sign-in provider, but not a
+    # member of this project, asks Alice's kopanod for an original by its hash
+    if '--peer' in sys.argv and '--stranger' in sys.argv:
+        peer, stranger = sys.argv[sys.argv.index('--peer') + 1], sys.argv[sys.argv.index('--stranger') + 1]
+        sd = f'{W}/stranger'
+        os.makedirs(sd)
+        for f in ('device.key', 'cert.json', 'project', 'kopano.redb', 'app.json'):
+            shutil.copy(os.path.join(stranger, f), sd)
+        json.dump({'id': adev, 'addrs': []}, open(f'{W}/alice-addr.json', 'w'))
+        other = next(i for i in st['items'] if not (i.get('name') or '').upper().startswith('DSC08379'))
+        orig_hash = next(e for e in json.load(open(f'{W}/b/projects/{pid[:8]}/media.json')).values() if e['name'] == other['name'])['original']['hash']
+        r = subprocess.run([peer, 'fetch-media', '--dir', sd, '--from', f'{W}/alice-addr.json', '--hash', orig_hash], capture_output=True, text=True, timeout=120)
+        out = (r.stdout + r.stderr).strip().splitlines()
+        res['gate'] = {'stranger': json.load(open(f'{sd}/cert.json'))['body']['name'], 'asked_for': other['name'], 'exit': r.returncode,
+                       'got_file': r.returncode == 0, 'last_lines': out[-2:]}
+        # the client only sees the connection drop; Alice's kopanod says why
+        time.sleep(1)
+        res['gate']['alice_log'] = [l.strip() for l in open(f'{W}/a/kopanod.log', errors='replace') if 'media: refused' in l][-2:]
     sa, sb = kcall('a', op='status', project=pid), kcall('b', op='status', project=pid)
     res['same_head'] = sa['head'] == sb['head']
     res['media_b'] = {k: v for k, v in kcall('b', op='media', project=pid).items() if k != 'items'}

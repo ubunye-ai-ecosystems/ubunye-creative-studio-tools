@@ -428,7 +428,7 @@ pub fn make_preview(cli: &str, original: &std::path::Path, out: &std::path::Path
         .arg(original)
         .arg("-o")
         .arg(out)
-        .args(["--size", "2560", "--quality", "90", "--opt", "metadata=none", "--settings"])
+        .args(["--size", "2560", "--quality", "90", "--settings"])
         .arg(&settings)
         .stdin(Stdio::null())
         .output()
@@ -468,7 +468,8 @@ mod tests {
     fn a_preview_file_without_an_alias_is_never_published() {
         let dir = if cfg!(windows) { r"C:\K\media\previews" } else { "/k/media/previews" };
         let stray = format!("{dir}{}x.jpg", std::path::MAIN_SEPARATOR);
-        let k = resolve_keys(&[photo(1, &stray, "aa", None), photo(2, "/home/me/own.jpg", "bb", None)], &BTreeMap::new(), Some(dir));
+        let none = BTreeMap::new();
+        let k = resolve_keys(&[photo(1, &stray, "aa", None), photo(2, "/home/me/own.jpg", "bb", None)], &none, Some(dir));
         assert!(k[0].is_none());
         assert_eq!(k[1].as_ref().map(|(k, _)| k.as_str()), Some("bb"));
     }

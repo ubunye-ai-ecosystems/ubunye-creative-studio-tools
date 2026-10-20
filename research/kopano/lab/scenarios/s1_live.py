@@ -8,12 +8,13 @@ import json, os, socket, subprocess, sys, threading, time
 
 K, A, B, BID = sys.argv[1:5]
 N = int(sys.argv[sys.argv.index('--edits') + 1]) if '--edits' in sys.argv else 20
-PORT = {A: 47101, B: 47102}
+BASE = int(sys.argv[sys.argv.index('--port-base') + 1]) if '--port-base' in sys.argv else 47100
+PORT = {A: BASE + 1, B: BASE + 2}
 res = {}
 
 
 def start(home):
-    log = open(os.path.join(home, 'kopanod.log'), 'w')
+    log = open(os.path.join(home, 'kopanod.log'), 'a')
     return subprocess.Popen([K, 'run', '--home', home, '--api-port', str(PORT[home])], stdout=log, stderr=log)
 
 

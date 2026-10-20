@@ -77,6 +77,9 @@ pub struct Media {
     refs: std::sync::Mutex<HashMap<Id, (Option<Id>, HashSet<String>)>>,
     /// originals on their way, for the `media` op: key -> progress
     pub jobs: std::sync::Mutex<BTreeMap<String, Value>>,
+    /// making previews ahead failed once (e.g. no Light engine here): stop trying in the
+    /// background; a teammate's request still tries and gets the reason
+    ahead_off: std::sync::atomic::AtomicBool,
 }
 
 impl Media {
@@ -85,7 +88,7 @@ impl Media {
         std::fs::create_dir_all(dir.join("previews"))?;
         let store = FsStore::load(dir.join("store")).await?;
         let made = std::fs::read(dir.join("previews.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Ok(Arc::new(Self { store, dir, made: std::sync::Mutex::new(made), render: Default::default(), conns: Default::default(), refs: Default::default(), jobs: Default::default() }))
+        Ok(Arc::new(Self { store, dir, made: std::sync::Mutex::new(made), render: Default::default(), conns: Default::default(), refs: Default::default(), jobs: Default::default(), ahead_off: Default::default() }))
     }
     pub fn preview_dir(&self) -> PathBuf {
         self.dir.join("previews")
@@ -377,6 +380,13 @@ async fn offer_inner(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Result<Off
             }
             let Some(path) = path else { bail!("no preview of this photo on this computer") };
             let _one = m.render.lock().await;
+            // made meanwhile (ahead, or for another teammate) while this one waited its turn
+            let made = m.made.lock().unwrap_or_else(|e| e.into_inner()).get(&hash).cloned();
+            if let Some(o) = made {
+                if m.complete(&o.hash).await {
+                    return Ok(o);
+                }
+            }
             let out = m.dir.join(format!("made-{}.jpg", &hash[..16]));
             let (cli, src, dst) = (light_cli(), PathBuf::from(&path), out.clone());
             let t = Instant::now();
@@ -518,7 +528,12 @@ pub fn spawn(node: Arc<Node>, p: Arc<Proj>) {
                 continue;
             }
             match fill(&node, &p).await {
-                Ok(n) => quiet = n == 0,
+                Ok(n) => {
+                    quiet = n == 0;
+                    if quiet {
+                        ahead(&node, &p).await;
+                    }
+                }
                 Err(e) => {
                     node.emit(json!({"event": "media", "project": p.project.id.hex(), "error": format!("{e:#}")}));
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -526,6 +541,29 @@ pub fn spawn(node: Arc<Node>, p: Arc<Proj>) {
             }
         }
     });
+}
+
+/// Make the previews of this device's originals before anyone asks, one at a time, so a
+/// teammate who joins gets photos in seconds. Only for projects shared with someone.
+async fn ahead(node: &Arc<Node>, p: &Arc<Proj>) {
+    let (Some(m), true) = (node.media.get(), p.project.genesis.members.len() > 1) else { return };
+    if m.ahead_off.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Ok(originals) = originals_in(&p.store, p.head()) else { return };
+    for a in originals.values() {
+        if m.made.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&a.hash) {
+            continue;
+        }
+        let mine = p.with_light(&node.device, |c| Ok(c.original_path(&a.hash).is_some())).unwrap_or(false);
+        if mine {
+            if let Err(e) = offer_inner(node, p, &json!({"hash": a.hash, "role": "preview"})).await {
+                eprintln!("[kopanod] media: previews are not made ahead on this device: {e:#}");
+                m.ahead_off.store(true, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+    }
 }
 
 /// One round: previews for every photo the window lacks. Returns how many are still missing.
@@ -555,6 +593,11 @@ async fn fill(node: &Arc<Node>, p: &Arc<Proj>) -> Result<usize> {
     let dir = m.preview_dir().join(&pid[..8]);
     std::fs::create_dir_all(&dir)?;
     let mut failed = 0usize;
+    let mut applied = 0usize;
+    // files already here (a restarted window) come back at once, without the network
+    if !ready.is_empty() {
+        applied += bring_in(node, p, &ready, false).await?;
+    }
     for (k, a) in &need {
         let mut got = None;
         for dev in sources(p) {
@@ -580,15 +623,16 @@ async fn fill(node: &Arc<Node>, p: &Arc<Proj>) -> Result<usize> {
         };
         let path = file_name_for(&dir, &o.name, Some("jpg"), &o.hash);
         m.store.blobs().export(o.hash.parse::<iroh_blobs::Hash>()?, &path).await?;
-        done += 1;
-        node.emit(json!({"event": "media", "project": pid, "photos_waiting": need.len() - done - failed, "photos_ready": done,
-            "photo": o.name, "mb_done": (bytes as f64 / 1e4).round() / 100.0}));
-        ready.push((k.clone(), Local { kind: "preview".into(), path: path.to_string_lossy().to_string(), name: o.name, original: a.clone(), preview: Some(o.hash) }));
-    }
-    if !ready.is_empty() {
-        let n = bring_in(node, p, &ready, false).await?;
+        // each photo shows as soon as its preview is here: the first one in seconds, not after all
+        let l = Local { kind: "preview".into(), path: path.to_string_lossy().to_string(), name: o.name.clone(), original: a.clone(), preview: Some(o.hash) };
+        applied += bring_in(node, p, &[(k.clone(), l)], false).await?;
         m.refs.lock().unwrap_or_else(|e| e.into_inner()).remove(&p.project.id);
-        node.emit(json!({"event": "media", "project": pid, "photos_waiting": total - ready.len(), "photos_ready": ready.len(), "applied": n,
+        done += 1;
+        node.emit(json!({"event": "media", "project": pid, "photos_waiting": need.len() - done - failed, "photos_ready": ready.len() + done,
+            "photo": o.name, "mb_done": (bytes as f64 / 1e4).round() / 100.0, "ms": started.elapsed().as_millis() as u64}));
+    }
+    if total > 0 {
+        node.emit(json!({"event": "media", "project": pid, "photos_waiting": failed, "photos_ready": ready.len() + done, "applied": applied,
             "mb": (bytes as f64 / 1e4).round() / 100.0, "ms": started.elapsed().as_millis() as u64, "done": failed == 0}));
     }
     Ok(failed)
@@ -627,13 +671,17 @@ async fn bring_in(node: &Arc<Node>, p: &Arc<Proj>, files: &[(String, Local)], or
         for (k, a) in aliases(&before) {
             c.previews.entry(k).or_insert(a);
         }
+        let t = Instant::now();
         c.snapshot()?;
         let fresh: Vec<String> = files.iter().filter(|(k, _)| if original { !c.has_original(k) } else { !c.has_photo(k) }).map(|(_, l)| l.path.clone()).collect();
         if !fresh.is_empty() {
             c.import_files(&fresh)?;
         }
+        let t_import = t.elapsed().as_millis();
         wait_shown(c, &keys, original, 60 + 5 * paths.len() as u64)?;
+        let t_shown = t.elapsed().as_millis();
         let n = apply_head(p, c, &keys)?;
+        eprintln!("[kopanod] media: {} file(s) in Light: import {t_import} ms, shown {t_shown} ms, settings {} ms", keys.len(), t.elapsed().as_millis());
         if original {
             // the original is in, with the project's settings: the preview stands down
             for k in &keys {

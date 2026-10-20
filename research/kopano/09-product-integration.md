@@ -75,3 +75,71 @@ server checks; no client inserts into device tables.
 | Later | Photo and Film connectors, finals sharing, own relay | |
 
 Production adoption of S2 (ThabangVision) waits for the owner's review.
+
+## 6. Slice "media": photos reach a teammate who does not have them
+
+Before this slice both Light windows already had the same photos. Now a teammate whose Light
+starts empty gets the owner's photos as previews, edits them with the team, and can ask for an
+original when needed. Code: `lab/kopano-node/src/media.rs`; test: `lab/scenarios/s5_media.py`.
+
+**How it works**
+
+1. kopanod serves files over the same endpoint (iroh-blobs). Every connection and every request
+   is checked: the device must have shown a current member's certificate on a project here, and
+   the file must belong to a project that device is a member of. Knowing a hash is not enough.
+2. Preview first. When the project has a photo the window does not show, kopanod asks an online
+   teammate (owner's devices first) for a preview, fetches it, and imports it into Light. The
+   device with the original makes each preview once, with Light's own renderer
+   (`lightcraft-cli render`, 2560 px JPEG, sharpening and noise reduction off, as shot), keeps it,
+   and makes them ahead of time for shared projects so a joiner does not wait for renders.
+   A device that only has the preview can hand it on.
+3. The key. Light keys a photo by the content hash of the file it imported. A preview is a
+   different file, so kopanod tells the Light connector "this preview file is the photo with the
+   ORIGINAL's key" (an alias by file path). The connector reports the photo under that key, with
+   the original's asset reference. Rules: a file in kopanod's preview folder without an alias is
+   never published as a photo; once the original is in Light, the original wins over its preview.
+4. Waiting photos are not deletions. A photo whose preview has not arrived still counts as the
+   project's state (the core would otherwise read an empty window as "everything removed" and
+   send that to the team). Changes for it wait in the project and are applied on arrival.
+5. Original on request: API `fetch-original {project, key}`. The size is proven first and must fit
+   on the disk, a cut download continues where it stopped (iroh-blobs keeps what arrived), and
+   `original` events report MB done every second. The original is imported beside the preview,
+   given the project's settings, and the preview is taken out of Light.
+6. Panel events, plain and small: `media {photos_waiting, photos_ready, photo, mb_done}`,
+   `original {photo, state, mb_done, mb_total}`, `preview-made` (on the owner's side). API `media`
+   says per photo whether it shows from its original, from a preview, or is still waiting.
+
+**Real test (2026-10-19, this PC, the owner's 5 Sony ARWs, Light windows driven by its control
+channel, screenshots in T:/kopano-lab/media/final)**
+
+| Step | Result |
+|---|---|
+| Member1's Light starts empty, joins | 5 of 5 photos arrived as previews: 3.3 MB in total for 246.5 MB of originals (1.3 %); first photo 10 s, all 36 s after joining (renders 4-7 s each on the owner's side) |
+| Alice edits exposure on her RAW | Member1's preview follows in 2.1 s |
+| Member1 edits contrast and stars on the preview | Alice's RAW follows in 2.1 s (stars 0.4 s): the key matches |
+| Member1 fetches one original (49.4 MB) | 0.5 s transfer on this PC, 1.9 s to swap in Light; the RAW shows with exposure +1.25, contrast +40, 4 stars; still 5 photos |
+| Alice edits again | Member1's original follows in 2.4 s; both heads equal |
+| A non-member device (valid certificate) asks Alice for an original | refused at connect |
+
+**Limits found (honest)**
+
+- A preview is a rendered JPEG: as shot it matches the RAW within 0.8/255 (mean), contrast 1,
+  white balance 2, but exposure +-2 is off by 15-36/255 and highlights/shadows by 27-31/255
+  (measured in Light at 1280 px). It is a picture to work on, not to judge tones on; the final
+  export happens where the originals are. E13 showed Light's own Smart Preview stays within
+  0.5/255, but Light cannot take one in today (see below).
+- The preview photo shows the file name `DSC08379.jpg` and kind "image" until the original comes.
+- The member's Light imports previews "in place" from kopanod's media folder; a Light restarted
+  in memory mode gets them back from that folder without the network.
+
+**Light changes that would make previews exact (not made: Light repo untouched)**
+
+1. `library.addFromSmartPreview {smartPreview: path to .lcsp, contentHash, fileName, captured,
+   fileSize, width, height, kind}`: a photo whose original is offline, keyed by the original's
+   content hash, rendered from the Smart Preview. No alias needed, edits match within 0.5/255.
+2. Smart Previews in `--memory` libraries (today they need a library on disk).
+3. `photo.exportSmartPreview {id, path}` on the control port, so kopanod does not need
+   `lightcraft-cli` beside it to make previews.
+4. `photo.relink` keeps the old kind and format (a JPEG relinked to an ARW stays "image"), which is
+   why the original is imported beside the preview instead of relinked.
+

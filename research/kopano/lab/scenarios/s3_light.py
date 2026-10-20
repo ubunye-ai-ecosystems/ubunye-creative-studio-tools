@@ -10,7 +10,9 @@ import json, os, shutil, socket, subprocess, sys, time
 LIGHT, K, W, ALICE, M1 = sys.argv[1:6]
 # owner rule 2026-10-19: tests and screenshots use Thabang's own photos (a folder of copies)
 PHOTOS = sys.argv[sys.argv.index('--photos') + 1] if '--photos' in sys.argv else None
-LP, KP = {'a': 18001, 'b': 18002}, {'a': 47111, 'b': 47112}
+LB = int(sys.argv[sys.argv.index('--light-base') + 1]) if '--light-base' in sys.argv else 18000
+KB = int(sys.argv[sys.argv.index('--port-base') + 1]) if '--port-base' in sys.argv else 47110
+LP, KP = {'a': LB + 1, 'b': LB + 2}, {'a': KB + 1, 'b': KB + 2}
 res = {}
 
 
