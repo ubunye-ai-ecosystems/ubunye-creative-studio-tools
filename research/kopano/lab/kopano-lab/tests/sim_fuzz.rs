@@ -646,3 +646,266 @@ fn sim_reliability() -> Result<()> {
     }
     Ok(())
 }
+
+// ---- a window that refuses updates (Photo's `kopano.import`) while its user keeps editing --------
+
+/// A pretend Photo window. Like `PhotoConnector`, the connector's model is Photo's document at the
+/// last snapshot with `apply` changes on top, and it reaches the window as ONE update after the
+/// call, which the window refuses when its document changed since that snapshot (the user edited
+/// meanwhile). The user edits between any two calls: Member paints tiles, Alice moves a slider.
+struct Window {
+    /// what the window shows, and its revision
+    doc: BTreeMap<String, Item>,
+    rev: u64,
+    /// the connector's model and the revision it was read at
+    model: BTreeMap<String, Item>,
+    read_at: u64,
+    loaded: bool,
+    dirty: bool,
+    rng: StdRng,
+    /// chance that the user edits before a call reaches the window
+    busy: f64,
+    /// keys this user edits
+    mine: Vec<String>,
+    /// every value the user gave each key, in order (the last one must survive)
+    edits: BTreeMap<String, Vec<u64>>,
+    next: u64,
+    refused: u64,
+}
+
+fn cell(key: &str, v: u64) -> Item {
+    if key.starts_with("tile/") {
+        Item { kind: "w.tile".into(), lane: "retouch".into(), schema: 1, state: json!({"hash": format!("h{v}")}), assets: vec![] }
+    } else {
+        Item { kind: "w.adjust".into(), lane: "adjust".into(), schema: 1, state: json!({"exposure": v}), assets: vec![] }
+    }
+}
+
+impl Window {
+    fn new(seed: u64, start: &BTreeMap<String, Item>, mine: Vec<String>, busy: f64, base: u64) -> Self {
+        Window { doc: start.clone(), rev: 1, model: BTreeMap::new(), read_at: 0, loaded: false, dirty: false, rng: StdRng::seed_from_u64(seed), busy, mine, edits: BTreeMap::new(), next: base, refused: 0 }
+    }
+    /// The user may edit now (a stroke on 1 to 3 tiles, or a slider move).
+    fn user(&mut self) {
+        if self.busy == 0.0 || !self.rng.gen_bool(self.busy) {
+            return;
+        }
+        for _ in 0..self.rng.gen_range(1..=3) {
+            let k = self.mine[self.rng.gen_range(0..self.mine.len())].clone();
+            self.next += 1;
+            self.doc.insert(k.clone(), cell(&k, self.next));
+            self.edits.entry(k).or_default().push(self.next);
+        }
+        self.rev += 1;
+    }
+    fn load(&mut self) {
+        self.user();
+        self.model = self.doc.clone();
+        self.read_at = self.rev;
+        self.loaded = true;
+        self.dirty = false;
+    }
+    /// The one update after a call (`with_photo` -> `settle` -> `flush`).
+    fn flush(&mut self) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        self.user();
+        self.dirty = false;
+        self.loaded = false;
+        if self.rev != self.read_at {
+            self.refused += 1;
+            return Err(kopano_lab::photo::Refused(format!("document changed since revision {}", self.read_at)).into());
+        }
+        self.doc = self.model.clone();
+        self.rev += 1;
+        Ok(())
+    }
+    fn discard(&mut self) {
+        self.dirty = false;
+        self.loaded = false;
+    }
+}
+
+impl Connector for Window {
+    fn info(&self) -> ConnectorInfo {
+        let k = |kind: &str, lane: &str, mergeable: bool| KindInfo { kind: kind.into(), lane: lane.into(), schema: 1, mergeable };
+        ConnectorInfo { app: "w".into(), contract: CONTRACT_VERSION, kinds: vec![k("w.tile", "retouch", false), k("w.adjust", "adjust", true)] }
+    }
+    fn snapshot(&mut self) -> Result<BTreeMap<String, Item>> {
+        self.flush()?;
+        self.load();
+        Ok(self.model.clone())
+    }
+    fn apply(&mut self, key: &str, item: Option<&Item>) -> Result<()> {
+        if !self.loaded {
+            self.load();
+        }
+        match item {
+            Some(i) => self.model.insert(key.into(), i.clone()),
+            None => self.model.remove(key),
+        };
+        self.dirty = true;
+        Ok(())
+    }
+}
+
+/// One device with a window (the store is shared, as in `repo::criss_cross`).
+struct Dev {
+    head: Option<Id>,
+    cert: DeviceCert,
+    key: DeviceKey,
+    w: Window,
+}
+
+/// One call to the window as kopanod makes it: `f`, then the update; a failed call is discarded
+/// (nothing half-applied is kept).
+fn call<R>(d: &mut Dev, f: impl FnOnce(&mut Repo<'_>, &mut Window) -> Result<R>, store: &MemStore, pid: &Id) -> Result<(R, Option<Id>)> {
+    let mut repo = Repo { store, project: Project::load(store, pid)?, head: d.head, cert: d.cert.clone(), key: DeviceKey::from_bytes(d.key.to_bytes()) };
+    let r = f(&mut repo, &mut d.w).and_then(|r| d.w.flush().map(|_| r));
+    if r.is_err() {
+        d.w.discard();
+    }
+    r.map(|r| (r, repo.head))
+}
+
+/// `watch_app`: save the window's own edits.
+fn app_save(d: &mut Dev, store: &MemStore, pid: &Id) -> Result<()> {
+    if let Ok((_, h)) = call(d, |repo, w| repo.save(w, "Edit in Photo"), store, pid) {
+        d.head = h;
+    }
+    Ok(())
+}
+
+/// `Node::integrate`: bring a teammate's head in; when the window refuses the update, try again
+/// (the next try's first step saves the user's edit), up to 8 times.
+fn bring_in(d: &mut Dev, theirs: Id, store: &MemStore, pid: &Id) -> Result<()> {
+    if let Some(m) = d.head {
+        if m == theirs || project::is_ancestor(store, &theirs, &m)? {
+            return Ok(());
+        }
+    }
+    for tries in 0..=8 {
+        match call(d, |repo, w| repo.integrate(w, &theirs), store, pid) {
+            Ok((_, h)) => {
+                d.head = h;
+                return Ok(());
+            }
+            Err(e) if tries < 8 && kopano_lab::photo::is_refused(&e) => continue,
+            Err(e) if kopano_lab::photo::is_refused(&e) => return Ok(()), // the next push tries again
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Member paints while Alice moves a slider (S6 step 5); each window refuses an update built on
+/// an old snapshot. At the end both windows and the project must hold each user's LAST edit of
+/// every key they edited. Returns (refused updates, keys whose last edit was lost).
+fn run_refusing(seed: u64, steps: usize) -> Result<(u64, Vec<String>)> {
+    let store = MemStore::default();
+    let provider = Provider::generate();
+    let (ka, km) = (DeviceKey::generate(), DeviceKey::generate());
+    let ca = provider.issue("alice", "Alice", &ka, "t", 3_600_000)?;
+    let cm = provider.issue("member1", "Member1", &km, "t", 3_600_000)?;
+    let members = BTreeMap::from([("member1".to_string(), Member { role: Role::Editor, lanes: vec![] })]);
+    let p = Project::create(&store, "refusing", vec![provider.public_hex()], &ca, &ka, members)?;
+    let tiles: Vec<String> = (0..12).map(|i| format!("tile/{i}")).collect();
+    let mut start: BTreeMap<String, Item> = tiles.iter().map(|k| (k.clone(), cell(k, 0))).collect();
+    start.insert("adjust/exposure".into(), cell("adjust/exposure", 0));
+    let mut rng = StdRng::seed_from_u64(seed ^ 0x5eed);
+    let busy = [0.2, 0.5, 0.8][rng.gen_range(0..3)];
+    let mut alice = Dev { head: None, cert: ca, key: ka, w: Window::new(seed * 2 + 1, &start, vec!["adjust/exposure".into()], busy / 2.0, 1_000_000) };
+    let mut member = Dev { head: None, cert: cm, key: km, w: Window::new(seed * 2 + 2, &start, tiles, 0.0, 0) };
+    app_save(&mut alice, &store, &p.id)?;
+    let h = alice.head.context("no first version")?;
+    // a joining window says nothing before the team's document is in (photo_binding `fresh`)
+    bring_in(&mut member, h, &store, &p.id)?;
+    member.w.busy = busy;
+    for _ in 0..steps {
+        match rng.gen_range(0..4) {
+            0 => app_save(&mut alice, &store, &p.id)?,
+            1 => app_save(&mut member, &store, &p.id)?,
+            2 => {
+                if let Some(h) = alice.head {
+                    bring_in(&mut member, h, &store, &p.id)?;
+                }
+            }
+            _ => {
+                if let Some(h) = member.head {
+                    bring_in(&mut alice, h, &store, &p.id)?;
+                }
+            }
+        }
+    }
+    // the users stop; everyone settles
+    alice.w.busy = 0.0;
+    member.w.busy = 0.0;
+    let tree_of = |h: Option<Id>| -> Result<Option<Id>> { h.map(|h| project::load_version(&store, &h)?.tree()).transpose().map(Option::flatten) };
+    let mut settled = false;
+    for _ in 0..8 {
+        app_save(&mut alice, &store, &p.id)?;
+        app_save(&mut member, &store, &p.id)?;
+        if let Some(h) = member.head {
+            bring_in(&mut alice, h, &store, &p.id)?;
+        }
+        if let Some(h) = alice.head {
+            bring_in(&mut member, h, &store, &p.id)?;
+        }
+        if tree_of(alice.head)? == tree_of(member.head)? && alice.w.doc == member.w.doc {
+            settled = true;
+            break;
+        }
+    }
+    if !settled {
+        bail!("I1 FAILED: the two windows did not settle");
+    }
+    let head_tree = tree::entries(&store, tree_of(member.head)?)?;
+    let mut lost = vec![];
+    for d in [&alice, &member] {
+        for (k, vals) in &d.w.edits {
+            let last = cell(k, *vals.last().expect("an edit"));
+            let in_head = head_tree.get(k).map(|id| Item::get(&store, id)).transpose()?;
+            if in_head.as_ref() != Some(&last) || d.w.doc.get(k) != Some(&last) {
+                let now = in_head.map(|i| i.state.to_string()).unwrap_or_default();
+                lost.push(format!("{k}: last edit {} (of {}), now {now}", last.state, vals.len()));
+            }
+        }
+    }
+    Ok((alice.w.refused + member.w.refused, lost))
+}
+
+/// The refused-update path must never lose a user's edit (S6 step 5 lost 10 to 11 of Member1's
+/// newest tiles, same head in both windows, 0 clashes, in 6 of 25 runs).
+#[test]
+fn sim_refused_updates_lose_nothing() -> Result<()> {
+    let seeds: u64 = std::env::var("SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
+    let first: u64 = std::env::var("SIM_FIRST").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (mut refused, mut lost_seeds, mut lost_keys, mut failed) = (0u64, 0u64, 0usize, 0u64);
+    let mut examples = vec![];
+    for seed in first..first + seeds {
+        match run_refusing(seed, 120) {
+            Ok((r, lost)) => {
+                refused += r;
+                if !lost.is_empty() {
+                    lost_seeds += 1;
+                    lost_keys += lost.len();
+                    if examples.len() < 3 {
+                        examples.push(format!("seed {seed}: {} key(s), e.g. {}", lost.len(), lost[0]));
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                if examples.len() < 3 {
+                    examples.push(format!("seed {seed}: {e:#}"));
+                }
+            }
+        }
+    }
+    println!("{}", json!({"test": "refused updates", "seeds": seeds, "refused_updates": refused, "seeds_with_loss": lost_seeds, "keys_lost": lost_keys, "failed": failed, "examples": examples}));
+    assert!(refused > 0, "the windows never refused an update: the test does not test the path");
+    assert_eq!(failed, 0, "seeds failed: {examples:?}");
+    assert_eq!(lost_keys, 0, "a user's last edit was silently lost: {examples:?}");
+    Ok(())
+}

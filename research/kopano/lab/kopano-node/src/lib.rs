@@ -503,8 +503,10 @@ impl Node {
                 return Ok(None);
             }
         }
-        // Photo refuses an update when the user edited the document meanwhile: try again, and
-        // the next try's first step saves that edit (photo_binding.rs)
+        // Photo refuses an update when the user edited the document after the snapshot the
+        // update was built on (Repo::integrate builds it on the snapshot it saved, never on a
+        // second read): try again, and the next try's first step saves that edit
+        // (photo_binding.rs)
         let mut tries = 0;
         let (repo_head, r) = loop {
             let mut repo = p.repo(&self.device)?;

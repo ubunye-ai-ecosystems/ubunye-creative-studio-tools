@@ -35,6 +35,15 @@ impl<'a> Repo<'a> {
 
     /// Save the app's current state as a new version. `None` when nothing changed.
     pub fn save(&mut self, conn: &mut dyn Connector, message: &str) -> Result<Option<Id>> {
+        self.save_seen(conn, message).map(|(v, _)| v)
+    }
+
+    /// `save`, also handing back the snapshot it saved. Restore and integrate build their changes
+    /// on exactly that snapshot: reading the app a second time would see edits the user made in
+    /// between, and applying the target over them would undo them unsaved (S6: 10 of Member1's
+    /// newest tiles reverted in both windows with 0 clashes). An app that checks its own revision
+    /// (Photo's `kopano.import`) then refuses the update instead, and the caller tries again.
+    fn save_seen(&mut self, conn: &mut dyn Connector, message: &str) -> Result<(Option<Id>, BTreeMap<String, Item>)> {
         let info = conn.info();
         let snap = conn.snapshot()?;
         let head_tree = self.head_tree()?;
@@ -60,14 +69,14 @@ impl<'a> Repo<'a> {
             }
         }
         if changes.is_empty() {
-            return Ok(None);
+            return Ok((None, snap));
         }
         let root = tree::update(self.store, head_tree, changes)?;
         let parents = self.head.into_iter().collect();
         let v = project::commit(self.store, &self.project, parents, root, message, &self.cert, &self.key)?;
         self.store.flush()?;
         self.head = Some(v);
-        Ok(Some(v))
+        Ok((Some(v), snap))
     }
 
     /// Save only what changed (E23): the app's change feed instead of a full snapshot, so a save
@@ -105,11 +114,11 @@ impl<'a> Repo<'a> {
         Ok(Some(v))
     }
 
-    /// Make the app match the tree of `target`; returns how many items were applied.
-    fn apply_tree(&self, conn: &mut dyn Connector, target_tree: Option<Id>) -> Result<usize> {
+    /// Make the app match the tree of `target`; returns how many items were applied. `have` is
+    /// the snapshot the caller just saved (`save_seen`), never a fresh read.
+    fn apply_tree(&self, conn: &mut dyn Connector, target_tree: Option<Id>, have: &BTreeMap<String, Item>) -> Result<usize> {
         let info = conn.info();
         let want = tree::entries(self.store, target_tree)?;
-        let have = conn.snapshot()?;
         let mut n = 0;
         for (key, id) in &want {
             let item = Item::get(self.store, id)?;
@@ -133,9 +142,9 @@ impl<'a> Repo<'a> {
     /// Go back to an earlier version. Saves first, then records the restore as a new version,
     /// so the state before the restore stays in history.
     pub fn restore(&mut self, conn: &mut dyn Connector, version: &Id) -> Result<Option<Id>> {
-        self.save(conn, "Before restore")?;
+        let (_, have) = self.save_seen(conn, "Before restore")?;
         let target = project::load_version(self.store, version)?;
-        self.apply_tree(conn, target.tree()?)?;
+        self.apply_tree(conn, target.tree()?, &have)?;
         self.save(conn, &format!("Restored to {}", version.short()))
     }
 
@@ -148,10 +157,10 @@ impl<'a> Repo<'a> {
     /// `integrate` for a head the caller has already verified under its own rules (v2 checks
     /// against the live members log, which can differ from the genesis members).
     pub fn integrate_checked(&mut self, conn: &mut dyn Connector, theirs: &Id) -> Result<Integrated> {
-        self.save(conn, "Before bringing in changes")?;
+        let (_, have) = self.save_seen(conn, "Before bringing in changes")?;
         let Some(mine) = self.head else {
             let t = project::load_version(self.store, theirs)?;
-            let applied = self.apply_tree(conn, t.tree()?)?;
+            let applied = self.apply_tree(conn, t.tree()?, &have)?;
             self.head = Some(*theirs);
             return Ok(Integrated::FastForward { applied });
         };
@@ -160,7 +169,7 @@ impl<'a> Repo<'a> {
         }
         if project::is_ancestor(self.store, &mine, theirs)? {
             let t = project::load_version(self.store, theirs)?;
-            let applied = self.apply_tree(conn, t.tree()?)?;
+            let applied = self.apply_tree(conn, t.tree()?, &have)?;
             self.head = Some(*theirs);
             return Ok(Integrated::FastForward { applied });
         }
@@ -184,7 +193,7 @@ impl<'a> Repo<'a> {
             }
         }
         let out = best.expect("at least one base");
-        let applied = self.apply_tree(conn, out.root)?;
+        let applied = self.apply_tree(conn, out.root, &have)?;
         let msg = if out.conflicts.is_empty() {
             "Merged".to_string()
         } else {
