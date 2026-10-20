@@ -152,6 +152,17 @@ pub struct FilmConnector {
     pub media_files: BTreeMap<String, String>,
     /// Parts of clips whose `edit` part has not arrived yet.
     pending: BTreeMap<(u64, u64), BTreeMap<String, Value>>,
+    /// Files that stand in for an original (a proxy imported because the original is not on
+    /// this computer): normalised path -> (original's BLAKE3, original's size). kopanod sets it.
+    pub aliases: BTreeMap<String, (String, u64)>,
+    /// Originals this computer does not have, by (file name, size) -> BLAKE3: a media item of a
+    /// shared project whose file is missing here is still known as that original. kopanod sets it.
+    pub offline: BTreeMap<(String, u64), String>,
+    /// Media item -> how it shows here, refreshed on every snapshot.
+    pub media_state: BTreeMap<String, MediaHere>,
+    /// The id block the window allocated from at the last snapshot (read with the same items, so
+    /// a window that opened another file in between is never mistaken for this project).
+    pub last_block: Option<u64>,
     /// The grade key of the first video clip, for the conformance merge tests.
     sample_key: String,
 }
@@ -193,7 +204,20 @@ impl FilmConnector {
         Self::with(Transport::control(port)?, fresh)
     }
     fn with(t: Transport, fresh: Fresh) -> Result<Self> {
-        let mut c = Self { t, fresh, turn: Cell::new(0), hashes: BTreeMap::new(), media_items: BTreeMap::new(), media_files: BTreeMap::new(), pending: BTreeMap::new(), sample_key: String::new() };
+        let mut c = Self {
+            t,
+            fresh,
+            turn: Cell::new(0),
+            hashes: BTreeMap::new(),
+            media_items: BTreeMap::new(),
+            media_files: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            offline: BTreeMap::new(),
+            media_state: BTreeMap::new(),
+            last_block: None,
+            sample_key: String::new(),
+        };
         c.find_sample()?;
         Ok(c)
     }
@@ -229,19 +253,55 @@ impl FilmConnector {
         Ok(Some((self.hashes[&k].clone(), meta.len())))
     }
 
-    /// Film item id -> (hash, size) for every media item backed by a readable file.
+    /// Film item id -> (hash, size) for every media item whose original is known: a readable
+    /// file (hashed), a stand-in file kopanod named (`aliases`), or a missing file kopanod
+    /// recognises by name and size (`offline`).
     fn media_table(&mut self, all: &Value) -> Result<BTreeMap<u64, (String, u64)>> {
         let mut out = BTreeMap::new();
         self.media_items.clear();
+        self.media_state.clear();
         for m in all.get("media").and_then(Value::as_array).cloned().unwrap_or_default() {
             let (Some(item), Some(path)) = (m.get("item").and_then(Value::as_u64), m.get("path").and_then(Value::as_str)) else { continue };
-            if let Some((hash, size)) = self.hash_file(path)? {
-                self.media_items.entry(hash.clone()).or_insert(item);
-                self.media_files.entry(hash.clone()).or_insert_with(|| path.to_string());
+            let name = m.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            let found = if let Some((h, size)) = self.aliases.get(&crate::light::norm_path(path)).cloned() {
+                Some((h, size, MediaHere::StandIn { item, path: path.into() }))
+            } else if let Some((h, size)) = self.hash_file(path)? {
+                self.media_files.entry(h.clone()).or_insert_with(|| path.to_string());
+                Some((h, size, MediaHere::Original { item, path: path.into() }))
+            } else {
+                let size = m.get("size").and_then(Value::as_u64);
+                let file = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(name.clone());
+                self.offline.iter().find(|((n, s), _)| (n.eq_ignore_ascii_case(&file) || n.eq_ignore_ascii_case(&name)) && size.is_none_or(|z| z == *s)).map(|((_, s), h)| (h.clone(), *s, MediaHere::Missing { item }))
+            };
+            if let Some((hash, size, here)) = found {
+                // a readable original wins over a stand-in or a missing copy of the same media
+                let better = match (self.media_state.get(&hash), &here) {
+                    (None, _) => true,
+                    (Some(MediaHere::Original { .. }), _) => false,
+                    (Some(_), MediaHere::Original { .. }) => true,
+                    _ => false,
+                };
+                if better {
+                    self.media_items.insert(hash.clone(), item);
+                    self.media_state.insert(hash.clone(), here);
+                }
                 out.insert(item, (hash, size));
             }
         }
         Ok(out)
+    }
+
+    /// Does this window have a media item for the original `hash` (in any form)?
+    pub fn has_media(&self, hash: &str) -> bool {
+        self.media_items.contains_key(hash)
+    }
+
+    /// The readable original file of `hash` on this computer, if any.
+    pub fn original_path(&self, hash: &str) -> Option<String> {
+        match self.media_state.get(hash) {
+            Some(MediaHere::Original { path, .. }) => Some(path.clone()),
+            _ => self.media_files.get(hash).filter(|p| !self.aliases.contains_key(&crate::light::norm_path(p)) && std::path::Path::new(p).is_file()).cloned(),
+        }
     }
 
     /// The local media item for `hash`, importing the file when this project lacks it.
@@ -284,6 +344,17 @@ impl FilmConnector {
 
 type Map = serde_json::Map<String, Value>;
 
+/// How one original shows in this window.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MediaHere {
+    /// the original file is here and readable
+    Original { item: u64, path: String },
+    /// a stand-in file (a proxy) is imported in its place
+    StandIn { item: u64, path: String },
+    /// the project's media item is here but its file is not
+    Missing { item: u64 },
+}
+
 impl Connector for FilmConnector {
     fn info(&self) -> ConnectorInfo {
         ConnectorInfo { app: "ubunye.film".into(), contract: CONTRACT_VERSION, kinds: kinds() }
@@ -291,6 +362,7 @@ impl Connector for FilmConnector {
 
     fn snapshot(&mut self) -> Result<BTreeMap<String, Item>> {
         let all = self.items_raw()?;
+        self.last_block = all.get("idBlock").and_then(Value::as_u64);
         let media = self.media_table(&all)?;
         let mut out = BTreeMap::new();
         for seq in all.get("sequences").and_then(Value::as_array).cloned().unwrap_or_default() {

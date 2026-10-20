@@ -17,6 +17,7 @@
 
 #[path = "../../kopano-lab/src/keystore.rs"]
 pub mod keystore;
+pub mod film_binding;
 pub mod media;
 pub mod unlinked;
 
@@ -76,6 +77,8 @@ pub struct Proj {
     online: std::sync::Mutex<BTreeMap<String, String>>,
     binding: std::sync::Mutex<Binding>,
     light: std::sync::Mutex<Option<LightConnector>>,
+    /// the Film window, when this project lives in Film (film_binding.rs)
+    film: std::sync::Mutex<Option<film_binding::Slot>>,
     /// the node's media (set when the node starts): where preview files live
     media: std::sync::OnceLock<Arc<media::Media>>,
 }
@@ -90,6 +93,10 @@ pub enum Binding {
     LightControl { port: u16 },
     /// a headless Light engine with the demo library (automated tests)
     LightHeadless { cli: String },
+    /// the running Film desktop app (`filmcraft --control PORT`), see film_binding.rs
+    FilmControl { port: u16 },
+    /// a headless Film engine (`filmcraft-cli mcp`) on a project file, or Film's demo (tests)
+    FilmHeadless { cli: String, project: Option<String> },
 }
 
 impl Proj {
@@ -108,6 +115,7 @@ impl Proj {
             online: Default::default(),
             binding: std::sync::Mutex::new(std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy)),
             light: Default::default(),
+            film: Default::default(),
             media: Default::default(),
         })
     }
@@ -121,6 +129,7 @@ impl Proj {
                 self.save_app(&app)?;
                 Ok(r)
             }),
+            Binding::FilmControl { .. } | Binding::FilmHeadless { .. } => film_binding::with_app(self, dev, f),
             // media.rs: photos whose preview is still on its way count as the project's state
             _ => self.with_light(dev, |c| f(&mut media::View::new(&self.store, self.head(), c))),
         }
@@ -135,7 +144,7 @@ impl Proj {
                 let mut c = match &binding {
                     Binding::LightControl { port } => LightConnector::live(*port).context("Light is not running with its control port")?,
                     Binding::LightHeadless { cli } => LightConnector::headless(cli)?,
-                    Binding::Toy => unreachable_toy()?,
+                    _ => unreachable_toy()?,
                 };
                 media::prepare(self.media.get(), self, &mut c);
                 self.reconcile(dev, &mut media::View::new(&self.store, self.head(), &mut c))?;
@@ -195,6 +204,7 @@ impl Proj {
         std::fs::write(self.dir.join("binding.json"), serde_json::to_vec(&b)?)?;
         *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = b;
         *self.light.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.film.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
     /// How many photos (items before the `#lane`) differ between two versions.
@@ -450,7 +460,13 @@ impl Node {
             if m != theirs && !project::is_ancestor(&p.store, &theirs, &m)? && !project::is_ancestor(&p.store, &m, &theirs)? {
                 let (tm, tt) = (project::load_version(&p.store, &m)?.tree()?, project::load_version(&p.store, &theirs)?.tree()?);
                 if tm == tt {
-                    if theirs < m {
+                    // Rank = (versions behind it, then the smaller id): a fast-forward always
+                    // raises it, so settling must too. Settling on the smaller id alone let two
+                    // forks whose trees cross-match (S6, after two windows were linked again)
+                    // cycle: settle back to an older version, fast-forward, settle, for ever,
+                    // with the window flipping between two states every second.
+                    let rank = |v: &Id| project::history(&p.store, &[*v]).map(|h| (h.len(), std::cmp::Reverse(*v)));
+                    if rank(&theirs)? > rank(&m)? {
                         p.set_head(Some(theirs))?;
                         return Ok(Some(("same content, settled", 0)));
                     }
@@ -518,7 +534,8 @@ impl Node {
                     (|| -> Result<Option<usize>> {
                         let before = p.head();
                         let mut repo = p.repo(&node.device)?;
-                        let v = p.with_app(&node.device, |app| repo.save(app, "Edit in Light"))?;
+                        let msg = if film_binding::is_film(&p.binding()) { "Edit in Film" } else { "Edit in Light" };
+                        let v = p.with_app(&node.device, |app| repo.save(app, msg))?;
                         if v.is_some() {
                             p.set_head(repo.head)?;
                         }
@@ -981,7 +998,7 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
 
 /// The token apps must show. Created once, readable by this user only (a file next to the key).
 fn unreachable_toy() -> Result<LightConnector> {
-    bail!("toy binding has no Light connection")
+    bail!("this project is not bound to Light")
 }
 
 pub fn api_token(home: &Path) -> Result<String> {
