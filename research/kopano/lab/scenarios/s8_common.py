@@ -242,3 +242,138 @@ def shots(run, windows, tag, caption):
             step[w.who] = w.shot(tag)
     run.res['steps'].append(step)
 
+
+
+# ---- Photo ---------------------------------------------------------------------------------------
+
+class Photo:
+    """One Ubunye Photo window and a control connection of its own (kopanod holds another)."""
+
+    def __init__(self, run, who, exe, port, doc=None):
+        self.run, self.who, self.exe, self.port, self.doc = run, who, exe, port, doc
+        self.root = f'{run.W}/photo-{who}'
+        self.token = f'{run.W}/photo-{who}.token'
+        self.p, self.n = None, 0
+
+    def start(self, open_doc):
+        os.makedirs(self.root, exist_ok=True)
+        if os.path.exists(self.token):
+            os.remove(self.token)
+        self.p = subprocess.Popen([self.exe, '--control', str(self.port), '--control-token-file', self.token,
+                                   '--automation-read-root', self.root, '--automation-write-root', self.root],
+                                  stdout=subprocess.DEVNULL, stderr=open(f'{self.run.W}/photo-{self.who}.log', 'a'))
+        self.run.procs.append(self.p)
+        for _ in range(450):
+            try:
+                if os.path.exists(self.token):
+                    self.connect()
+                    break
+            except OSError:
+                pass
+            time.sleep(0.2)
+        self.rpc('ui.resize', {'width': 1200, 'height': 780})
+        if open_doc:
+            shutil.copy(self.doc, f'{self.root}/owner.pcraft')
+            self.rpc('app.open', {'path': 'owner.pcraft'})
+        else:
+            self.cmd('file.new', width=800, height=600, background='white', name='Blank')
+        wait_for(lambda: self.export() is not None, 90, 0.3)
+        return self
+
+    def connect(self):
+        # Photo closes a control connection that is quiet for 30 s: open it again when needed
+        self.s = socket.create_connection(('127.0.0.1', self.port), timeout=120)
+        self.f, self.last = self.s.makefile('r'), time.time()
+        self.rpc('auth', {'token': open(self.token).read().strip()})
+
+    def rpc(self, method, params=None):
+        if method != 'auth' and time.time() - self.last > 20:
+            self.s.close()
+            self.connect()
+        self.last = time.time()
+        self.n += 1
+        self.s.sendall((json.dumps({'id': self.n, 'method': method, 'params': params or {}}) + '\n').encode())
+        while True:
+            r = json.loads(self.f.readline())
+            if r.get('id') == self.n:
+                break
+        if not r.get('ok'):
+            raise RuntimeError(f'{method}: {r.get("error")}')
+        return r.get('result')
+
+    def cmd(self, command, **params):
+        return self.rpc('engine.execute', {'command': command, 'params': params})
+
+    def export(self):
+        return self.cmd('kopano.export')['manifest']['document']
+
+    def quit(self):
+        try:
+            self.rpc('app.quit')
+        except Exception:
+            pass
+        try:
+            self.p.wait(15)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+
+    def shot(self, tag):
+        try:
+            self.rpc('ui.set', {'fit': True})
+            time.sleep(0.8)
+            self.rpc('ui.screenshot', {'path': f'{tag}.png'})
+            os.makedirs(self.run.shots, exist_ok=True)
+            dst = f'{self.run.shots}/{tag}-{self.who}.png'
+            shutil.copy(f'{self.root}/{tag}.png', dst)
+            return os.path.abspath(dst)
+        except Exception as e:
+            self.run.res.setdefault('screenshot_errors', []).append(f'{self.who} {tag}: {e}')
+
+    def binding(self):
+        return {'kind': 'photo-control', 'port': self.port, 'token_file': self.token}
+
+
+def walk_layers(layers, out):
+    for l in layers:
+        out.append(l)
+        walk_layers(l.get('content', {}).get('children', []) or [], out)
+    return out
+
+
+def doc_tiles(v, out=None):
+    out = [] if out is None else out
+    if isinstance(v, dict):
+        if 'tx' in v and 'hash' in v:
+            out.append(v['hash'])
+        else:
+            for x in v.values():
+                doc_tiles(x, out)
+    elif isinstance(v, list):
+        for x in v:
+            doc_tiles(x, out)
+    return out
+
+
+def shape(doc):
+    """What must match between two Photo windows: layers (name, settings, opacity) and every tile."""
+    ls = []
+    for l in walk_layers(doc.get('layers', []), []):
+        c = dict(l.get('content', {}))
+        c.pop('children', None)
+        ls.append((l.get('name'), json.dumps(c.get('adjustment'), sort_keys=True), l.get('opacity'), l.get('visible')))
+    return ls, sorted(doc_tiles(doc.get('layers', []))), json.dumps(doc.get('size'))
+
+
+def layer_id(w, name):
+    return next(l['id'] for l in reversed(walk_layers(w.export().get('layers', []), [])) if l.get('name') == name)
+
+
+def moved_kb(k):
+    n = 0
+    for l in open(f'{k.home}/kopanod.log', encoding='utf-8', errors='replace'):
+        if ' KB moved for ' in l:
+            try:
+                n += int(l.split('): ', 1)[1].split(' KB moved', 1)[0])
+            except Exception:
+                pass
+    return n

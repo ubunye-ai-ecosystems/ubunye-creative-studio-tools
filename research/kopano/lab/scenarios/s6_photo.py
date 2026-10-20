@@ -248,7 +248,7 @@ try:
 
     # 0. Alice starts the project from her window; Member1's blank window joins and must become it
     t0 = time.time()
-    made = kcall('a', op='create-project', name='Owner photo (S6)', app=binding('a'),
+    made = kcall('a', op='create-project', name='Owner photo (S6)', mode='live', app=binding('a'),
                  members=[{'account': m1['account'], 'role': 'editor', 'lanes': []}])
     pid = made['project']
     res['create'] = {'items': made['items'], 'ms': round((time.time() - t0) * 1000)}

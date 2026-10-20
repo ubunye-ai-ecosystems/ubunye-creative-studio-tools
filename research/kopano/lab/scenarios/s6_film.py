@@ -213,7 +213,7 @@ try:
 
     # ---- 1. Alice starts the project, Member1 joins ----
     t0 = time.time()
-    made = kcall('a', op='create-project', name='Cable way (S6)', app={'kind': 'film-control', 'port': FP['a']},
+    made = kcall('a', op='create-project', name='Cable way (S6)', mode='live', app={'kind': 'film-control', 'port': FP['a']},
                  members=[{'account': m1['account'], 'role': 'editor', 'lanes': []}])
     pid = made['project']
     res['create'] = {'items': made['items'], 'ms': round((time.time() - t0) * 1000)}

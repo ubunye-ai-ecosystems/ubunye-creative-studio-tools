@@ -365,15 +365,61 @@ fn reconcile<A: PhotoApp>(p: &Proj, dev: &Device, live: &mut Live<A>) -> Result<
     let root = project::load_version(&p.store, &h)?.tree()?;
     let want = tree::entries(&p.store, root)?;
     let have = live.app.snapshot()?;
-    let mut changes = Vec::new();
+    let mut differ = Vec::new();
     for (k, item) in &have {
         let id = item.put(&p.store)?;
         if want.get(k) != Some(&id) {
-            changes.push((k.clone(), Some(id)));
+            differ.push((k.clone(), id));
+        }
+    }
+    // S8 (as `Proj::reconcile`): a state the project never had is the person's work, made while
+    // the window was not linked (strokes painted while kopanod was stopped); it stays and the next
+    // save takes it. Older states (a fresh window, an untouched original) are put back.
+    let mut heads = vec![h];
+    if crate::approve::on(p) {
+        heads.extend(crate::approve::ref_versions(p));
+    }
+    let seen = crate::seen_states(&p.store, &heads, differ.iter().map(|(k, _)| k))?;
+    let (stale, work): (Vec<_>, Vec<_>) = differ.into_iter().partition(|(k, id)| seen.get(k).is_some_and(|s| s.contains(id)));
+    let mut work: std::collections::BTreeSet<String> = work.into_iter().map(|(k, _)| k).collect();
+    // A layer made in this window before any update reached it has no uid stored in the document
+    // yet, so a new connection names it anew: it is the head's layer under another key, not new
+    // work (the same layer item, the same tiles). It goes back under the head's key.
+    let missing: Vec<&String> = want.keys().filter(|k| !have.contains_key(*k) && !k.contains('@') && k.starts_with("layer/")).collect();
+    let rekeyed: Vec<String> = work
+        .iter()
+        .filter(|k| k.starts_with("layer/") && !k.contains('@') && !want.contains_key(*k))
+        .filter(|l| {
+            missing.iter().any(|m| {
+                let state = |id: &Id| Item::get(&p.store, id).ok().map(|i| (i.kind, i.state));
+                let tiles = |pre: &str, src: &mut dyn Iterator<Item = (String, Option<(String, Value)>)>| -> BTreeMap<String, Option<(String, Value)>> { src.filter_map(|(k, v)| k.strip_prefix(pre).map(|s| (s.to_string(), v))).collect() };
+                let same_layer = have.get(*l).map(|i| (i.kind.clone(), i.state.clone())) == want.get(*m).and_then(state);
+                let lt = tiles(&format!("{l}@"), &mut have.iter().map(|(k, i)| (k.clone(), Some((i.kind.clone(), i.state.clone())))));
+                let mt = tiles(&format!("{m}@"), &mut want.iter().map(|(k, id)| (k.clone(), state(id))));
+                same_layer && lt == mt
+            })
+        })
+        .cloned()
+        .collect();
+    for l in &rekeyed {
+        let pre = format!("{l}@");
+        work.retain(|k| k != l && !k.starts_with(&pre));
+    }
+    if !rekeyed.is_empty() && work.iter().all(|k| k == "doc") {
+        work.clear(); // the document's layer list named the same layers under the new keys
+    }
+    if !work.is_empty() {
+        eprintln!("[kopanod] {}: a Photo window was linked again with {} item(s) edited while it was not linked; kept in the window as edits ({})", p.project.id.short(), work.len(), work.iter().take(4).cloned().collect::<Vec<_>>().join(", "));
+    }
+    let mut changes: Vec<(String, Option<Id>)> = stale.into_iter().map(|(k, id)| (k, Some(id))).collect();
+    for (k, item) in &have {
+        if rekeyed.iter().any(|l| k == l || k.starts_with(&format!("{l}@"))) || (k == "doc" && !rekeyed.is_empty() && !work.contains(k) && want.get(k) != Some(&item.put(&p.store)?)) {
+            changes.push((k.clone(), Some(item.put(&p.store)?)));
         }
     }
     let info = live.app.info();
     for (k, id) in &want {
+        // an item the window lacks comes back (an offline delete is undone, never a loss)
         if !have.contains_key(k) && info.owns(&Item::get(&p.store, id)?.kind) {
             changes.push((k.clone(), None));
         }
@@ -382,6 +428,7 @@ fn reconcile<A: PhotoApp>(p: &Proj, dev: &Device, live: &mut Live<A>) -> Result<
         return Ok(());
     }
     let n = changes.len();
+    let named: Vec<String> = changes.iter().take(4).map(|(k, _)| k.clone()).collect();
     let kept_root = tree::update(&p.store, root, changes)?;
     let kept = project::commit(&p.store, &p.project, vec![h], kept_root, "Kept: this window's own state when it was linked again", &dev.cert, &dev.key)?;
     p.store.flush()?;
@@ -390,17 +437,20 @@ fn reconcile<A: PhotoApp>(p: &Proj, dev: &Device, live: &mut Live<A>) -> Result<
     kopano_core::store::write_atomic(&p.dir.join("kept.json"), &serde_json::to_vec(&list)?)?;
     let mut view = View { live: &mut *live };
     for (k, id) in &want {
+        if work.contains(k) {
+            continue;
+        }
         let item = Item::get(&p.store, id)?;
         if info.owns(&item.kind) && have.get(k) != Some(&item) {
             view.apply(k, Some(&item))?;
         }
     }
     for k in have.keys() {
-        if !want.contains_key(k) {
+        if !want.contains_key(k) && !work.contains(k) {
             view.apply(k, None)?;
         }
     }
-    eprintln!("[kopanod] {}: a Photo window was linked again; brought it to the project ({n} item(s) differed, kept as {})", p.project.id.short(), kept.short());
+    eprintln!("[kopanod] {}: a Photo window was linked again; brought it to the project ({n} item(s) held older states, kept as {}: {})", p.project.id.short(), kept.short(), named.join(", "));
     Ok(())
 }
 

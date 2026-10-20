@@ -196,7 +196,7 @@ try:
 
     m1 = json.load(open(f'{W}/b/cert.json'))['body']
     adev = json.load(open(f'{W}/a/cert.json'))['body']['device']
-    made = kcall('a', op='create-project', name='Media slice shoot', app={'kind': 'light-control', 'port': LP['a']},
+    made = kcall('a', op='create-project', name='Media slice shoot', mode='live', app={'kind': 'light-control', 'port': LP['a']},
                  members=[{'account': m1['account'], 'role': 'editor', 'lanes': []}])
     pid = made['project']
     res['create'] = made
