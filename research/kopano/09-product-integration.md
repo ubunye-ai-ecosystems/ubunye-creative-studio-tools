@@ -511,9 +511,70 @@ panels open; screenshots of both windows at every step in T:/kopano-lab/approve)
 
 Regressions on this branch: kopano-core 10 of 10 plus 3; kopano-node 33 of 33 (10 new: approve, decline, owner edits reach a member with work waiting, clashes per photo, a non-approver and a forged main update refused, approver granted and taken back, view saves nothing, restart keeps state, live genesis bytes unchanged, live clash pick); Light panel tests 24 of 24 (4 new), clippy and fmt clean; sim_workflow 200 of 200; attacks 4 of 4; sim_fuzz 200 seeds, 0 diverged, 0 stuck, 0 silent losses, refused updates 200 seeds 0 lost; S1 20 of 20 edits (median 936 ms, debug build, busy PC), both ways, concurrent edits settle, restart catch-up; S3 in live mode (now asked for explicitly) exposure 0.8 s, stars 0.9 s, slider drag 1.0 s, same head.
 
+**S8: the test gaps closed (2026-10-20, branch `test/approve-gaps`)**
+
+Six scenario scripts, each printing PASS/FAIL per check and one JSON line at the end, so they can
+be run again: `lab/scenarios/s8_*.py` (helpers in `s8_common.py`). Real windows, each with its own
+kopanod (own KOPANO_HOME and KOPANO_API_PORT, own device), the owner's own photos and footage;
+screenshots of every window at every step in `T:/kopano-lab/approve-gaps/<scenario>/`.
+
+| Script | What it runs | Result |
+|---|---|---|
+| `s8_photo_approve.py` | two Photo windows, DSC08379: member paints, View, Approve, Decline, owner paints meanwhile, both kopanod restarted, member paints with his kopanod stopped | 33 of 33; stroke in review 0.7 s, owner's window after Approve 54 ms (tiles came at View), 0 media refused |
+| `s8_film_approve.py` | two Film windows, the 3 Sony clips: id blocks, razor on both sides, member -9 dB and trim while the owner grades, Approve, Decline, member edit with kopanod stopped | 30 of 30; ids unique per block; frame and 2 s H.264 export byte-identical (6.48 MB) |
+| `s8_light_restart.py` | the Light windows restart (own libraries on disk): edit then close at once, owner's window closed while he edits, window closed while she views his version, window and kopanod down while viewing, his window closed while she approves, both at once | 26 of 26; no edit lost, none approved by a restart |
+| `s8_two_approvers.py` | three Light windows (owner, Bob made approver, Member1): both approve the same change at once; each approves a different change at once | 16 of 16; one main, both changes, nothing offered again |
+| `s8_clash_pick.py` | live: both change one setting at once, the panel's value buttons pressed with real input; approve: "Keep yours" / "Take theirs" then Approve | 24 of 24 |
+| `s8_offline.py` | member edits with his kopanod stopped (Light open), also across a Light restart; owner edits with hers stopped | 20 of 20; his edits in review 12.9 s after his kopanod started (most of it the service coming online) |
+
+Found and fixed (each was lost work or work that should not have moved):
+
+- **Edits made while a window was not linked were put aside.** A window that stayed open while
+  kopanod was stopped (or was closed and opened on its own library meanwhile) was brought back to
+  the head, so the edits vanished from the window and only `kept.json` had them (Light, Photo and
+  Film alike). Now only items whose window state the project held before (any known version, the
+  members' branches included) are put back; a state the project never had stays and the next save
+  takes it. A member's version still in the owner's window after a crash while she viewed it is a
+  state the project knows, so it is put back and never saved into main.
+- **Photo layers made before any update reached the window** have no uid stored in the document, so
+  a new connection names them anew; with the rule above a restarted kopanod doubled such a layer.
+  A layer with the same item and the same tiles as a head layer the window lacks is now that layer.
+- **A teammate's restart took 45 s to reach us** (our watch hung on the dead connection until QUIC
+  gave up). Watch requests now carry a per-start number; a changed one restarts our watch at once
+  (17.8 s, mostly the address lookup).
+- **Two approvers at once:** the losing approval was offered again under the approver's name,
+  catch-up merges in the branches showed as "changed 0 photos" and Member1 stayed "waiting". Now
+  the device whose main update lost applies it again on the winning main when no new decision is
+  needed (a clash leaves it offered again), work that adds nothing to main is not listed, and a
+  member whose own edits are all in main reads "approved".
+- **A member's value lost in a clash.** When main's change to the same setting reached the member
+  before his reached the approver, the catch-up merge settled the clash the way every device does:
+  his -15 became main's 15 in his own window and the approver never saw a clash. Now the member's
+  window keeps his own value (with the clash record), the approver's review shows both values, and
+  "Keep yours" / "Take theirs" decide it.
+- S5 and S6 asked for no mode, so since this slice they ran in approve mode and S6 Photo failed
+  without saying so; they now ask for "live".
+
+Regressions after the fixes: kopano-core 10 of 10 plus 3; kopano-node 38 of 38 (6 new); S7 30 of
+30; S6 Photo (live) windows match, team edits back in a reopened window in 4.6 s, 0 tiles lost;
+S6 Film (live) exports identical, fresh and reopened windows brought to the project, 20 s quiet
+stable; sim_fuzz 200 seeds, 0 diverged, 0 stuck, 0 silent losses, refused updates 200 seeds 0 lost; sim_workflow 200 of 200; attacks 4 of 4. (sim_* and attacks exercise kopano-core and kopano-lab, which S8 did not change.)
+
+Still open after S8:
+
+- The rule "a state the project never had is new work" means an offline edit that returns an item
+  exactly to an older value (a reset to as-imported) is put back; it is kept in `kept.json`.
+- Photo's root cause stays: locally made layers get their uid stored only with the next update.
+- The `summary` text says "photos" for Photo tiles and Film clips (14 "photos" for one document);
+  only Light has a review panel so far.
+- Film can refuse a user edit made while a merge is half applied (overlap, section 8); the script
+  waits for the teammate's cut before editing on.
+- A just-started kopanod can fail a join with "no addressing information" (iroh lookup); a retry
+  works. `seen_states` walks the history of every ref on each relink; not measured at size.
+
 **Limits found (honest)**
 
-- Tested end to end with Light only. Photo and Film windows sign their saves into the branch too
+- Tested end to end with Light only (S8 above now covers Photo and Film). Photo and Film windows sign their saves into the branch too
   (the same hook), but no real Photo or Film run in approve mode yet.
 - The owner's edits in her window while she views a member's version are not saved (saves pause
   until Done; the panel says so).
@@ -521,7 +582,7 @@ Regressions on this branch: kopano-core 10 of 10 plus 3; kopano-node 33 of 33 (1
   shows the account.
 - One approver in the real test: two approvers approving at once (a main fork, offered again) is
   covered by sim_workflow and the code path, not by a real run. Restarting the Light windows
-  themselves (not only kopanod) was not part of S7.
+  themselves (not only kopanod) was not part of S7. (Both run for real in S8 above.)
 - `pending` diffs every waiting branch on each status poll; fine for a shoot, not measured at
   thousands of photos.
 - Older panels that send no mode now create approve projects (the API default; scripts that

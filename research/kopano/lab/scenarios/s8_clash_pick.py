@@ -56,7 +56,13 @@ def setup(tag, mode):
     made = ka.call(op='create-project', name=f'Owner shoot ({mode})', mode=mode, app={'kind': 'light-control', 'port': la.port},
                    members=[{'account': m1['account'], 'role': 'editor', 'lanes': []}])
     pid = made['project']
-    kb.call(op='join', project=pid, **{'from': adev}, app={'kind': 'light-control', 'port': lb.port})
+    for i in range(4):  # the address lookup can miss a just-started service; the panel tries again too
+        try:
+            kb.call(op='join', project=pid, **{'from': adev}, app={'kind': 'light-control', 'port': lb.port})
+            break
+        except RuntimeError as e:
+            run.res.setdefault('join_retries', []).append(str(e))
+            time.sleep(5)
     run.check(f'{mode}: joined', wait_for(lambda: kb.call(op='status', project=pid)['head'] is not None and len(lb.photos()) == len(la.photos()), 60) is not None)
     time.sleep(3)
     for l in (la, lb):
