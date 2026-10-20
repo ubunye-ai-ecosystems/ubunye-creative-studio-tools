@@ -332,7 +332,9 @@ pub fn sign_mine(node: &Node, p: &Proj) -> Result<bool> {
 
 /// Bring one version into the window (saving the window's own edit first), with the same retry
 /// as live projects when Photo refuses an update built on an older snapshot.
-fn bring(node: &Node, p: &Proj, v: &Id) -> Result<Option<(&'static str, usize)>> {
+/// `keep_mine`: a member taking main in keeps his own value where main changed the same setting
+/// (see `keep_mine`), so the approver decides that clash, not the merge.
+fn bring(node: &Node, p: &Proj, v: &Id, keep_mine_on_clash: bool) -> Result<Option<(&'static str, usize)>> {
     let before = p.head();
     let mut tries = 0;
     let (repo_head, r) = loop {
@@ -350,8 +352,92 @@ fn bring(node: &Node, p: &Proj, v: &Id) -> Result<Option<(&'static str, usize)>>
         Integrated::AlreadyHad if repo_head != before => Some(("saved an edit made meanwhile", 0)),
         Integrated::AlreadyHad => None,
         Integrated::FastForward { .. } => Some(("fast-forward", 0)),
-        Integrated::Merged { conflicts, .. } => Some(("merged", conflicts.len())),
+        Integrated::Merged { conflicts, .. } => {
+            if keep_mine_on_clash && !conflicts.is_empty() {
+                keep_mine(node, p, &conflicts)?;
+            }
+            Some(("merged", conflicts.len()))
+        }
     })
+}
+
+/// `into` with the settings a clash names (`fields`, as the merge labels them) taken from `from`.
+fn take_fields(into: &Item, from: &Item, fields: &[String]) -> Item {
+    if fields.iter().any(|f| f == "whole item") || into.kind != from.kind {
+        return from.clone();
+    }
+    let mut state = into.state.clone();
+    for (path, _, val) in differences(&into.state, &from.state) {
+        if fields.contains(&label(&path)) {
+            if let Some(slot) = state.pointer_mut(&format!("/{}", path.replace('.', "/"))) {
+                *slot = val;
+            }
+        }
+    }
+    Item { state, ..into.clone() }
+}
+
+/// S8 found a member's own value replaced by main's when his window took main in: the merge
+/// settles a clashing setting the same way on every device, so his -15 became main's 15 in his
+/// own window, the approver saw no clash, and his work was gone. In an approve project the
+/// member keeps his own value (his window, his branch, with the clash record) and the approver
+/// decides with "Keep yours" / "Take theirs". Call under `p.write`, after the merge.
+fn keep_mine(node: &Node, p: &Proj, conflicts: &[kopano_core::merge::Conflict]) -> Result<()> {
+    let Some(head) = p.head() else { return Ok(()) };
+    let root = tree_of(p, Some(head))?;
+    let (mut changes, mut items) = (vec![], vec![]);
+    for c in conflicts {
+        let Some(mine) = c.mine else { continue }; // he removed it: the merge keeps data
+        let mine = Item::get(&p.store, &mine)?;
+        let now = tree::get(&p.store, root, &c.key)?.map(|i| Item::get(&p.store, &i)).transpose()?;
+        let want = match &now {
+            Some(n) => take_fields(n, &mine, &c.fields),
+            None => mine.clone(),
+        };
+        if now.as_ref() != Some(&want) {
+            changes.push((c.key.clone(), Some(want.put(&p.store)?)));
+            items.push((c.key.clone(), want));
+        }
+    }
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let new_root = tree::update(&p.store, root, changes)?;
+    let v = project::commit(&p.store, &p.project, vec![head], new_root, "Kept my own values where main changed the same settings (for the approver)", &node.device.cert, &node.device.key)?;
+    // the window first: if it cannot take them, the head stays what the window shows
+    p.with_app(&node.device, |app| {
+        let info = app.info();
+        for (k, it) in &items {
+            if info.owns(&it.kind) {
+                app.apply(k, Some(it))?;
+            }
+        }
+        Ok(())
+    })?;
+    p.set_head(Some(v))
+}
+
+/// Clashes a member's branch carries as records (his window took main in and kept his own value,
+/// `keep_mine`) that main still differs on: (item key, fields, main's item, his item).
+fn record_clashes(p: &Proj, main: &Id, v: &Id) -> Result<Vec<(String, Vec<String>, Item, Item)>> {
+    let base = project::common_ancestor(&p.store, main, v)?;
+    let (bt, vt, mt) = (tree_of(p, base)?, tree_of(p, Some(*v))?, tree_of(p, Some(*main))?);
+    let mut out = vec![];
+    for (k, _, after) in tree::diff(&p.store, bt, vt)? {
+        let Some(rid) = after.filter(|_| k.starts_with(CONFLICT_PREFIX)) else { continue };
+        if tree::get(&p.store, mt, &k)?.is_some() {
+            continue;
+        }
+        let rec = Item::get(&p.store, &rid)?;
+        let Some(key) = rec.state["key"].as_str() else { continue };
+        let fields: Vec<String> = rec.state["fields"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(str::to_string)).collect();
+        let get = |t: Option<Id>| -> Result<Option<Item>> { tree::get(&p.store, t, key)?.map(|i| Item::get(&p.store, &i)).transpose() };
+        let (Some(mi), Some(vi)) = (get(mt)?, get(vt)?) else { continue };
+        if take_fields(&mi, &vi, &fields) != mi {
+            out.push((key.to_string(), fields, mi, vi));
+        }
+    }
+    Ok(out)
 }
 
 /// Bring the window to what it should show: the owner's to main; a member's to his branch with
@@ -381,7 +467,8 @@ pub fn refresh(node: &Node, p: &Proj) -> Result<Option<(&'static str, usize)>> {
         if p.head().is_some_and(|h| is_anc(p, &w, &h)) {
             continue;
         }
-        if let Some((how, c)) = bring(node, p, &w)? {
+        let keep = w == main && my_ref(node, p) != MAIN;
+        if let Some((how, c)) = bring(node, p, &w, keep)? {
             out = Some(match out {
                 Some((_, c0)) => ("merged", c0 + c),
                 None => (how, c),
@@ -604,6 +691,14 @@ fn pending_entry(node: &Node, p: &Proj, account: &str, v: &Id, main: &Id) -> Res
         let (ms, ts) = (m.map(|i| i.state).unwrap_or(Value::Null), t.map(|i| i.state).unwrap_or(Value::Null));
         let settings: Vec<Value> = differences(&ms, &ts).into_iter().map(|(path, a, b)| json!({"setting": path, "main": a, "member": b})).collect();
         clashes.push(json!({"key": c.key, "photo": photo_of(&c.key), "fields": c.fields, "settings": settings}));
+    }
+    for (key, fields, mi, vi) in record_clashes(p, main, v)? {
+        if out.conflicts.iter().any(|c| c.key == key) {
+            continue;
+        }
+        let whole = fields.iter().any(|f| f == "whole item");
+        let settings: Vec<Value> = differences(&mi.state, &vi.state).into_iter().filter(|(path, _, _)| whole || fields.contains(&label(path))).map(|(path, a, b)| json!({"setting": path, "main": a, "member": b})).collect();
+        clashes.push(json!({"key": key, "photo": photo_of(&key), "fields": fields, "settings": settings}));
     }
     let n = photos.len();
     Ok(json!({"account": account, "name": name_of(node, p, account), "version": v.hex(), "photos": n, "summary": photos_text(n),
@@ -830,7 +925,28 @@ pub async fn approve(node: &Node, p: &Proj, who: &str, version: Option<&str>, pr
         let c = choices.get(key).or_else(|| choices.get(&photo_of(key))).and_then(Value::as_str);
         c.map_or(default_member, |c| c != "main")
     };
-    let (nv, clashes) = wf::approve_with(&p.store, &p.project, &main, &v, &pick, &|k: &str| mergeable(k), &node.device.cert, &node.device.key)?;
+    let recorded = record_clashes(p, &main, &v)?;
+    let (mut nv, mut clashes) = wf::approve_with(&p.store, &p.project, &main, &v, &pick, &|k: &str| mergeable(k), &node.device.cert, &node.device.key)?;
+    // clashes his window recorded (keep_mine): his value is in his work; "Keep yours" puts main's back
+    let root = tree_of(p, Some(nv))?;
+    let mut changes = vec![];
+    for (key, fields, mi, _) in &recorded {
+        clashes += 1;
+        if pick(key) {
+            continue;
+        }
+        if let Some(now) = tree::get(&p.store, root, key)?.map(|i| Item::get(&p.store, &i)).transpose()? {
+            let want = take_fields(&now, mi, fields);
+            if want != now {
+                changes.push((key.clone(), Some(want.put(&p.store)?)));
+            }
+        }
+    }
+    if !changes.is_empty() {
+        let new_root = tree::update(&p.store, root, changes)?;
+        nv = project::commit(&p.store, &p.project, vec![nv], new_root, "Clash decided: kept main's value", &node.device.cert, &node.device.key)?;
+        p.store.flush()?;
+    }
     let seen = wf::member_tips(&p.store, &p.review.members());
     let id = wf::update_ref(&p.store, &p.project, MAIN, &nv, Some((main_id, main_u.seq)), &seen, &node.device.cert, &node.device.key)?;
     p.store.flush()?;
@@ -1475,6 +1591,34 @@ mod tests {
             assert_eq!(t.p(i).head(), t.main(i), "window {i} shows main");
         }
         assert_eq!(t.review(1)["mine"]["state"], "approved");
+        Ok(())
+    }
+
+    /// S8: main's change reaches the member before his reaches the approver, on the same setting.
+    /// His window keeps his own value (not main's), and the approver decides the clash.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_member_keeps_his_value_and_the_approver_decides() -> Result<()> {
+        let t = team("keepmine").await?;
+        for (round, (mine, hers, choice)) in [(-15.0, 15.0, "main"), (-7.0, 7.0, "member")].into_iter().enumerate() {
+            t.set(1, "photo-0001", "develop.contrast", mine).await?;
+            t.set(0, "photo-0001", "develop.contrast", hers).await?;
+            t.sync(0, 1).await?; // he takes main in first
+            assert_eq!(t.get(1, "photo-0001", "develop.contrast"), mine, "round {round}: his own value stays in his window");
+            t.both().await?;
+            let r = t.review(0);
+            let c = &r["pending"][0]["clashes"];
+            assert_eq!(c.as_array().map(Vec::len), Some(1), "round {round}: the approver sees the clash: {r}");
+            assert_eq!(c[0]["settings"][0]["main"], json!(hers));
+            assert_eq!(c[0]["settings"][0]["member"], json!(mine));
+            let choices = serde_json::from_value::<Map<String, Value>>(json!({"photo-0001": choice}))?;
+            approve(&t.nodes[0], &t.p(0), "acct-m1", None, None, &choices).await?;
+            let want = if choice == "main" { hers } else { mine };
+            t.both().await?;
+            assert_eq!(t.get(0, "photo-0001", "develop.contrast"), want, "round {round}: main has the choice");
+            assert_eq!(t.get(1, "photo-0001", "develop.contrast"), want, "round {round}: his window follows main");
+            assert_eq!(t.p(1).head(), t.main(1));
+            assert!(t.review(0)["pending"].as_array().unwrap().is_empty());
+        }
         Ok(())
     }
 
