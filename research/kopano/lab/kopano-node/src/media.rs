@@ -6,9 +6,12 @@
 //!
 //! 1. Preview first. A photo in the project that this device's app does not show yet gets a
 //!    preview from whichever online teammate has one (the device with the original makes it
-//!    once, in its own app's renderer, and keeps it to hand out again). The preview is imported
-//!    into the app and stands in for the original under the ORIGINAL's photo key, so every edit
-//!    made on it lands on the same photo everywhere.
+//!    once and keeps it to hand out again). The preview is put into the app and stands in for
+//!    the original under the ORIGINAL's photo key, so every edit made on it lands on the same
+//!    photo everywhere. For Light the preview is Light's own Smart Preview (.lcsp, made by the
+//!    window with `photo.exportSmartPreview`, added with `library.addFromSmartPreview`): edits
+//!    render on it within about 1.5/255 of the RAW. A Light without those commands gets a
+//!    rendered JPEG instead (`lightcraft-cli render`), kept under an alias.
 //! 2. Original on request (`fetch-original`): the full file, with progress, resume after a cut
 //!    and a disk-space check first; then it is imported beside the preview, given the project's
 //!    settings, and the preview is taken out.
@@ -18,7 +21,9 @@
 //! shows). Per project: `media.json` (photo key -> the file standing in for it here).
 //!
 //! The keys (why they match on both sides): Light keys a photo by its own content hash of the
-//! file it imported. The preview is another file, so Light would key it differently. kopanod
+//! file it imported. A Smart Preview is added under the ORIGINAL's content hash, so it needs
+//! nothing more; the connector only learns which stand-ins are the project's (`stand_ins`).
+//! A JPEG preview is another file, so Light would key it differently. kopanod
 //! therefore tells the Light connector which preview file stands for which project key
 //! (`PreviewAlias`, by file path, which survives Light restarts and asynchronous imports), and
 //! the connector reports the photo under that key with the original's asset reference. A
@@ -54,7 +59,7 @@ pub struct Offer {
 /// The file standing in for one photo on this device.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Local {
-    /// "preview" or "original"
+    /// "smart-preview" (Light's .lcsp), "preview" (a JPEG under an alias) or "original"
     pub kind: String,
     pub path: String,
     pub name: String,
@@ -62,6 +67,9 @@ pub struct Local {
     /// BLAKE3 of the preview (also handed on to teammates who ask)
     #[serde(default)]
     pub preview: Option<String>,
+    /// that preview is a Smart Preview (kept when the original took over)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview_lcsp: bool,
 }
 
 pub struct Media {
@@ -80,6 +88,23 @@ pub struct Media {
     /// making previews ahead failed once (e.g. no Light engine here): stop trying in the
     /// background; a teammate's request still tries and gets the reason
     pub(crate) ahead_off: std::sync::atomic::AtomicBool,
+    /// this device's Light cannot export Smart Previews (an older build): JPEG previews only
+    pub(crate) lcsp_off: std::sync::atomic::AtomicBool,
+}
+
+/// Where a Smart Preview this device made is remembered in `made` (a JPEG under the bare hash).
+fn lcsp_key(original: &str) -> String {
+    format!("lcsp:{original}")
+}
+/// The asker can take a Smart Preview (an older kopanod asks without `accept` and gets a JPEG).
+fn accepts_lcsp(req: &Value) -> bool {
+    req.get("accept").and_then(Value::as_array).is_some_and(|a| a.iter().any(|f| f == "lcsp"))
+}
+/// The file at `path` is a Light Smart Preview.
+fn is_lcsp(path: &Path) -> bool {
+    use std::io::Read;
+    let mut b = [0u8; 6];
+    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut b)).is_ok() && b == kopano_lab::light::SMART_PREVIEW_MAGIC
 }
 
 impl Media {
@@ -88,7 +113,7 @@ impl Media {
         std::fs::create_dir_all(dir.join("previews"))?;
         let store = FsStore::load(dir.join("store")).await?;
         let made = std::fs::read(dir.join("previews.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Ok(Arc::new(Self { store, dir, made: std::sync::Mutex::new(made), render: Default::default(), conns: Default::default(), refs: Default::default(), jobs: Default::default(), ahead_off: Default::default() }))
+        Ok(Arc::new(Self { store, dir, made: std::sync::Mutex::new(made), render: Default::default(), conns: Default::default(), refs: Default::default(), jobs: Default::default(), ahead_off: Default::default(), lcsp_off: Default::default() }))
     }
     pub fn preview_dir(&self) -> PathBuf {
         self.dir.join("previews")
@@ -118,9 +143,15 @@ fn save_local(p: &Proj, m: &BTreeMap<String, Local>) -> Result<()> {
 pub fn aliases(m: &BTreeMap<String, Local>) -> BTreeMap<String, PreviewAlias> {
     m.iter().filter(|(_, l)| l.kind == "preview").map(|(k, l)| (norm_path(&l.path), PreviewAlias { key: k.clone(), assets: vec![l.original.clone()] })).collect()
 }
+/// The photos Light shows from a Smart Preview this device added (key -> original's assets).
+pub fn stand_ins(m: &BTreeMap<String, Local>) -> BTreeMap<String, Vec<AssetRef>> {
+    m.iter().filter(|(_, l)| l.kind == "smart-preview").map(|(k, l)| (k.clone(), vec![l.original.clone()])).collect()
+}
 /// Give a freshly connected Light window this project's previews.
 pub fn prepare(node_media: Option<&Arc<Media>>, p: &Proj, c: &mut LightConnector) {
-    c.previews = aliases(&local(p));
+    let here = local(p);
+    c.previews = aliases(&here);
+    c.stand_ins = stand_ins(&here);
     c.preview_dir = node_media.map(|m| m.preview_dir().to_string_lossy().to_string());
 }
 
@@ -258,7 +289,7 @@ fn refs(m: &Media, p: &Proj) -> HashSet<String> {
     let originals: HashSet<String> = originals_in(&p.store, head).map(|o| o.into_values().map(|a| a.hash).collect()).unwrap_or_default();
     let mut set = originals.clone();
     for (orig, o) in m.made.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        if originals.contains(orig) {
+        if originals.contains(orig.strip_prefix("lcsp:").unwrap_or(orig)) {
             set.insert(o.hash.clone());
         }
     }
@@ -368,15 +399,20 @@ async fn offer_inner(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Result<Off
             Ok(Offer { hash, size: asset.size, name })
         }
         Some("preview") => {
-            let made = m.made.lock().unwrap_or_else(|e| e.into_inner()).get(&hash).cloned();
-            if let Some(o) = made {
+            // a Smart Preview when the asker takes one and this Light can make one, else a JPEG
+            let lcsp = accepts_lcsp(req) && !m.lcsp_off.load(std::sync::atomic::Ordering::Relaxed);
+            let made_of = |k: &str| m.made.lock().unwrap_or_else(|e| e.into_inner()).get(k).cloned();
+            let mine = if lcsp { lcsp_key(&hash) } else { hash.clone() };
+            if let Some(o) = made_of(&mine) {
                 if m.complete(&o.hash).await {
                     return Ok(o);
                 }
             }
+            // one received here is handed on (a Smart Preview only to who takes one)
             if let Some(l) = &here {
                 if let Some(ph) = &l.preview {
-                    if m.complete(ph).await {
+                    let sp = l.kind == "smart-preview" || l.preview_lcsp;
+                    if (accepts_lcsp(req) || !sp) && m.complete(ph).await {
                         let size = m.store.remote().local(ph.parse::<iroh_blobs::Hash>()?).await?.local_bytes();
                         return Ok(Offer { hash: ph.clone(), size, name: l.name.clone() });
                     }
@@ -385,10 +421,42 @@ async fn offer_inner(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Result<Off
             let Some(path) = path else { bail!("no preview of this photo on this computer") };
             let _one = m.render.lock().await;
             // made meanwhile (ahead, or for another teammate) while this one waited its turn
-            let made = m.made.lock().unwrap_or_else(|e| e.into_inner()).get(&hash).cloned();
-            if let Some(o) = made {
+            if let Some(o) = made_of(&mine) {
                 if m.complete(&o.hash).await {
                     return Ok(o);
+                }
+            }
+            if lcsp {
+                let key = originals.iter().find(|(_, a)| a.hash == hash).map(|(k, _)| k.clone()).unwrap_or_default();
+                let out = std::path::absolute(m.dir.join(format!("made-{}.lcsp", &hash[..16])))?;
+                let out_s = out.to_string_lossy().to_string();
+                let t = Instant::now();
+                // Ok(Err(..)): Light refused, and the window's connection stays up
+                let r = p.with_light(&node.device, |c| Ok(c.export_smart_preview(&key, &out_s)))?;
+                match r {
+                    Ok(_) if is_lcsp(&out) => {
+                        let ms = t.elapsed().as_millis() as u64;
+                        let tag = m.store.blobs().add_path(&out).await?;
+                        let size = std::fs::metadata(&out)?.len();
+                        let _ = std::fs::remove_file(&out);
+                        let o = Offer { hash: tag.hash.to_hex().to_string(), size, name: name_of(&path) };
+                        m.remember_made(&lcsp_key(&hash), o.clone())?;
+                        m.refs.lock().unwrap_or_else(|e| e.into_inner()).remove(&p.project.id);
+                        node.emit(json!({"event": "preview-made", "project": p.project.id.hex(), "photo": o.name, "kb": size / 1000, "ms": ms, "format": "smart-preview"}));
+                        return Ok(o);
+                    }
+                    Ok(_) => eprintln!("[kopanod] media: Light wrote no Smart Preview of {}; a JPEG preview instead", name_of(&path)),
+                    Err(e) if kopano_lab::light::lacks_command(&e) => {
+                        m.lcsp_off.store(true, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("[kopanod] media: this Light cannot export Smart Previews; JPEG previews instead");
+                    }
+                    Err(e) => eprintln!("[kopanod] media: no Smart Preview of {}: {e:#}; a JPEG preview instead", name_of(&path)),
+                }
+                let _ = std::fs::remove_file(&out);
+                if let Some(o) = made_of(&hash) {
+                    if m.complete(&o.hash).await {
+                        return Ok(o);
+                    }
                 }
             }
             let out = m.dir.join(format!("made-{}.jpg", &hash[..16]));
@@ -402,7 +470,7 @@ async fn offer_inner(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Result<Off
             let o = Offer { hash: tag.hash.to_hex().to_string(), size, name: name_of(&path) };
             m.remember_made(&hash, o.clone())?;
             m.refs.lock().unwrap_or_else(|e| e.into_inner()).remove(&p.project.id);
-            node.emit(json!({"event": "preview-made", "project": p.project.id.hex(), "photo": o.name, "kb": size / 1000, "ms": render_ms}));
+            node.emit(json!({"event": "preview-made", "project": p.project.id.hex(), "photo": o.name, "kb": size / 1000, "ms": render_ms, "format": "jpeg"}));
             Ok(o)
         }
         _ => bail!("role must be preview or original"),
@@ -559,12 +627,16 @@ async fn ahead(node: &Arc<Node>, p: &Arc<Proj>) {
     }
     let Ok(originals) = originals_in(&p.store, p.head()) else { return };
     for a in originals.values() {
-        if m.made.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&a.hash) {
+        let done = {
+            let made = m.made.lock().unwrap_or_else(|e| e.into_inner());
+            made.contains_key(&lcsp_key(&a.hash)) || (m.lcsp_off.load(std::sync::atomic::Ordering::Relaxed) && made.contains_key(&a.hash))
+        };
+        if done {
             continue;
         }
         let mine = p.with_light(&node.device, |c| Ok(c.original_path(&a.hash).is_some())).unwrap_or(false);
         if mine {
-            if let Err(e) = offer_inner(node, p, &json!({"hash": a.hash, "role": "preview"})).await {
+            if let Err(e) = offer_inner(node, p, &json!({"hash": a.hash, "role": "preview", "accept": ["lcsp", "jpg"]})).await {
                 eprintln!("[kopanod] media: previews are not made ahead on this device: {e:#}");
                 m.ahead_off.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
@@ -608,7 +680,7 @@ async fn fill(node: &Arc<Node>, p: &Arc<Proj>) -> Result<usize> {
     for (k, a) in &need {
         let mut got = None;
         for dev in sources(p) {
-            let o = match ask(node, p, &dev, &json!({"op": "media", "hash": a.hash, "role": "preview"})).await {
+            let o = match ask(node, p, &dev, &json!({"op": "media", "hash": a.hash, "role": "preview", "accept": ["lcsp", "jpg"]})).await {
                 Ok(v) => serde_json::from_value::<Offer>(v)?,
                 Err(e) => {
                     eprintln!("[kopanod] media: {} has no preview of {}: {e:#}", &dev[..8], &k[..8.min(k.len())]);
@@ -628,10 +700,15 @@ async fn fill(node: &Arc<Node>, p: &Arc<Proj>) -> Result<usize> {
             failed += 1;
             continue;
         };
-        let path = file_name_for(&dir, &o.name, Some("jpg"), &o.hash);
-        m.store.blobs().export(o.hash.parse::<iroh_blobs::Hash>()?, &path).await?;
+        let tmp = std::path::absolute(dir.join(format!(".{}.part", &o.hash[..16])))?;
+        m.store.blobs().export(o.hash.parse::<iroh_blobs::Hash>()?, &tmp).await?;
+        // the file says what it is: Light's Smart Preview, else a JPEG (an older Light made it)
+        let sp = is_lcsp(&tmp);
+        let path = file_name_for(&dir, &o.name, Some(if sp { "lcsp" } else { "jpg" }), &o.hash);
+        std::fs::rename(&tmp, &path)?;
         // each photo shows as soon as its preview is here: the first one in seconds, not after all
-        let l = Local { kind: "preview".into(), path: path.to_string_lossy().to_string(), name: o.name.clone(), original: a.clone(), preview: Some(o.hash) };
+        let kind = if sp { "smart-preview" } else { "preview" };
+        let l = Local { kind: kind.into(), path: path.to_string_lossy().to_string(), name: o.name.clone(), original: a.clone(), preview: Some(o.hash), preview_lcsp: sp };
         applied += bring_in(node, p, &[(k.clone(), l)], false).await?;
         m.refs.lock().unwrap_or_else(|e| e.into_inner()).remove(&p.project.id);
         done += 1;
@@ -678,11 +755,19 @@ async fn bring_in(node: &Arc<Node>, p: &Arc<Proj>, files: &[(String, Local)], or
         for (k, a) in aliases(&before) {
             c.previews.entry(k).or_insert(a);
         }
+        for (k, a) in stand_ins(&before) {
+            c.stand_ins.entry(k).or_insert(a);
+        }
         let t = Instant::now();
         c.snapshot()?;
-        let fresh: Vec<String> = files.iter().filter(|(k, _)| if original { !c.has_original(k) } else { !c.has_photo(k) }).map(|(_, l)| l.path.clone()).collect();
-        if !fresh.is_empty() {
-            c.import_files(&fresh)?;
+        let fresh: Vec<&(String, Local)> = files.iter().filter(|(k, _)| if original { !c.has_original(k) } else { !c.has_photo(k) }).collect();
+        // Smart Previews go in under the original's key; JPEGs and originals are imported in place
+        for (k, l) in fresh.iter().filter(|(_, l)| l.kind == "smart-preview") {
+            c.add_smart_preview(&l.path, k, &l.name)?;
+        }
+        let in_place: Vec<String> = fresh.iter().filter(|(_, l)| l.kind != "smart-preview").map(|(_, l)| l.path.clone()).collect();
+        if !in_place.is_empty() {
+            c.import_files(&in_place)?;
         }
         let t_import = t.elapsed().as_millis();
         wait_shown(c, &keys, original, 60 + 5 * paths.len() as u64)?;
@@ -691,13 +776,16 @@ async fn bring_in(node: &Arc<Node>, p: &Arc<Proj>, files: &[(String, Local)], or
         eprintln!("[kopanod] media: {} file(s) in Light: import {t_import} ms, shown {t_shown} ms, settings {} ms", keys.len(), t.elapsed().as_millis());
         if original {
             // the original is in, with the project's settings: the preview stands down
+            // (Light itself hands a Smart Preview stand-in over to its original; one still left
+            // beside the original goes too)
             for k in &keys {
-                if let Some(id) = c.alias_id(k) {
+                if let Some(id) = c.alias_id(k).or(c.stand_in_id(k).filter(|id| c.id_of(k) != Some(*id))) {
                     c.remove_photo(id)?;
                 }
             }
         }
         c.previews = aliases(&here);
+        c.stand_ins = stand_ins(&here);
         Ok(n)
     })
 }
@@ -785,9 +873,16 @@ async fn get_original(node: &Arc<Node>, p: &Arc<Proj>, key: &str, a: &AssetRef) 
     m.store.blobs().export_with_opts(opts).await?;
     let t2 = Instant::now();
     let prev = local(p).remove(key);
-    let l = Local { kind: "original".into(), path: path.to_string_lossy().to_string(), name: o.name.clone(), original: a.clone(), preview: prev.as_ref().and_then(|l| l.preview.clone()) };
+    let l = Local {
+        kind: "original".into(),
+        path: path.to_string_lossy().to_string(),
+        name: o.name.clone(),
+        original: a.clone(),
+        preview: prev.as_ref().and_then(|l| l.preview.clone()),
+        preview_lcsp: prev.as_ref().is_some_and(|l| l.kind == "smart-preview" || l.preview_lcsp),
+    };
     bring_in(node, p, &[(key.to_string(), l)], true).await?;
-    if let Some(pv) = prev.filter(|l| l.kind == "preview") {
+    if let Some(pv) = prev.filter(|l| l.kind == "preview" || l.kind == "smart-preview") {
         let _ = std::fs::remove_file(&pv.path); // Light no longer shows it; the blob stays to hand on
     }
     Ok(json!({"photo": o.name, "mb": (a.size as f64 / 1e4).round() / 100.0, "ms": ms, "swap_ms": t2.elapsed().as_millis() as u64}))
@@ -970,8 +1065,8 @@ mod tests {
     fn aliases_point_preview_files_at_the_originals_keys() {
         let a = AssetRef { hash: "b3".into(), size: 1, role: "original".into() };
         let m = BTreeMap::from([
-            ("e21e378d".to_string(), Local { kind: "preview".into(), path: "T:/k/media/previews/p/DSC08379.jpg".into(), name: "DSC08379.ARW".into(), original: a.clone(), preview: Some("pv".into()) }),
-            ("0ca370f6".to_string(), Local { kind: "original".into(), path: "T:/k/media/originals/p/DSC08399.ARW".into(), name: "DSC08399.ARW".into(), original: a.clone(), preview: None }),
+            ("e21e378d".to_string(), Local { kind: "preview".into(), path: "T:/k/media/previews/p/DSC08379.jpg".into(), name: "DSC08379.ARW".into(), original: a.clone(), preview: Some("pv".into()), preview_lcsp: false }),
+            ("0ca370f6".to_string(), Local { kind: "original".into(), path: "T:/k/media/originals/p/DSC08399.ARW".into(), name: "DSC08399.ARW".into(), original: a.clone(), preview: None, preview_lcsp: false }),
         ]);
         let al = aliases(&m);
         assert_eq!(al.len(), 1, "an original needs no alias: Light keys it by its own content");
@@ -979,6 +1074,31 @@ mod tests {
         assert_eq!(path, &norm_path("T:/k/media/previews/p/DSC08379.jpg"));
         assert_eq!(alias.key, "e21e378d");
         assert_eq!(alias.assets, vec![a]);
+    }
+
+    #[test]
+    fn smart_previews_need_no_alias_and_are_known_by_their_bytes() {
+        let d = temp("lcsp");
+        let a = AssetRef { hash: "b3".into(), size: 49_000_000, role: "original".into() };
+        let sp = d.join("DSC08379.lcsp");
+        std::fs::write(&sp, b"LCSP1\n{\"w\":2560}\n\xff\xd8").unwrap();
+        std::fs::write(d.join("DSC08399.jpg"), b"\xff\xd8\xff\xe0 jpeg").unwrap();
+        let m = BTreeMap::from([
+            ("e21e378d".to_string(), Local { kind: "smart-preview".into(), path: sp.to_string_lossy().into(), name: "DSC08379.ARW".into(), original: a.clone(), preview: Some("pv".into()), preview_lcsp: true }),
+            ("0ca370f6".to_string(), Local { kind: "preview".into(), path: d.join("DSC08399.jpg").to_string_lossy().into(), name: "DSC08399.ARW".into(), original: a.clone(), preview: Some("pj".into()), preview_lcsp: false }),
+        ]);
+        assert_eq!(aliases(&m).len(), 1, "only the JPEG preview needs an alias");
+        assert_eq!(stand_ins(&m), BTreeMap::from([("e21e378d".to_string(), vec![a])]));
+        assert!(is_lcsp(&sp));
+        assert!(!is_lcsp(&d.join("DSC08399.jpg")));
+        assert!(!is_lcsp(&d.join("missing.lcsp")));
+        assert!(accepts_lcsp(&json!({"accept": ["lcsp", "jpg"]})));
+        assert!(!accepts_lcsp(&json!({"hash": "b3", "role": "preview"})), "an older kopanod gets a JPEG");
+        assert_eq!(lcsp_key("b3"), "lcsp:b3");
+        // a media.json written before Smart Previews still reads
+        let old: Local = serde_json::from_value(json!({"kind": "preview", "path": "x.jpg", "name": "x", "original": {"hash": "b3", "size": 1, "role": "original"}})).unwrap();
+        assert!(!old.preview_lcsp);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

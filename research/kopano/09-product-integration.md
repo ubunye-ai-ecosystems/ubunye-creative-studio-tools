@@ -88,23 +88,32 @@ original when needed. Code: `lab/kopano-node/src/media.rs`; test: `lab/scenarios
    is checked: the device must have shown a current member's certificate on a project here, and
    the file must belong to a project that device is a member of. Knowing a hash is not enough.
 2. Preview first. When the project has a photo the window does not show, kopanod asks an online
-   teammate (owner's devices first) for a preview, fetches it, and imports it into Light. The
-   device with the original makes each preview once, with Light's own renderer
-   (`lightcraft-cli render`, 2560 px JPEG, sharpening and noise reduction off, as shot), keeps it,
-   and makes them ahead of time for shared projects so a joiner does not wait for renders.
-   A device that only has the preview can hand it on.
-3. The key. Light keys a photo by the content hash of the file it imported. A preview is a
-   different file, so kopanod tells the Light connector "this preview file is the photo with the
-   ORIGINAL's key" (an alias by file path). The connector reports the photo under that key, with
-   the original's asset reference. Rules: a file in kopanod's preview folder without an alias is
-   never published as a photo; once the original is in Light, the original wins over its preview.
+   teammate (owner's devices first) for a preview, fetches it, and puts it into Light. The
+   preview is Light's own Smart Preview: the device with the original asks its window for it
+   (`photo.exportSmartPreview {id, path}` on the control port; a .lcsp file, the scene-linear
+   proxy plus the facts Light needs to render it as the original: content hash, name, kind,
+   format, size, white balance, lens, camera fields). It keeps it, and makes them ahead of time
+   for shared projects so a joiner does not wait. A device that only has the preview can hand
+   it on. The asker says `accept: ["lcsp", "jpg"]`; the receiver tells the format from the
+   file's first bytes.
+3. The key. The member's kopanod adds the preview with `library.addFromSmartPreview
+   {smartPreview, contentHash, fileName}`, and Light keys the photo by the ORIGINAL's content
+   hash itself, so no alias is needed. Light names its file `smart-preview:/<hash>/<name>`
+   (offline). The connector only learns which of these stand-ins are the project's (and the
+   original's asset reference to publish); a stand-in it was not told about is never published,
+   and once the original is in Light the original wins.
+   Fallback for an older Light (no `photo.exportSmartPreview`, or the export fails): the device
+   with the original renders a JPEG (`lightcraft-cli render`, 2560 px, sharpening and noise
+   reduction off, as shot) and the member imports it under an alias by file path, as before.
 4. Waiting photos are not deletions. A photo whose preview has not arrived still counts as the
    project's state (the core would otherwise read an empty window as "everything removed" and
    send that to the team). Changes for it wait in the project and are applied on arrival.
 5. Original on request: API `fetch-original {project, key}`. The size is proven first and must fit
    on the disk, a cut download continues where it stopped (iroh-blobs keeps what arrived), and
-   `original` events report MB done every second. The original is imported beside the preview,
-   given the project's settings, and the preview is taken out of Light.
+   `original` events report MB done every second. The original is imported in place; Light
+   hands the Smart Preview stand-in over to it under the same photo id, settings, history and
+   stars kept (a JPEG preview is instead taken out after the original is given the project's
+   settings).
 6. Panel events, plain and small: `media {photos_waiting, photos_ready, photo, mb_done}`,
    `original {photo, state, mb_done, mb_total}`, `preview-made` (on the owner's side). API `media`
    says per photo whether it shows from its original, from a preview, or is still waiting.
@@ -124,26 +133,52 @@ channel, kopanod with the S4 changes merged; screenshots in T:/kopano-lab/media/
 
 **Limits found (honest)**
 
-- A preview is a rendered JPEG: as shot it matches the RAW within 0.8/255 (mean), contrast 1,
-  white balance 2, but exposure +-2 is off by 15-36/255 and highlights/shadows by 27-31/255
-  (measured in Light at 1280 px). It is a picture to work on, not to judge tones on; the final
-  export happens where the originals are. E13 showed Light's own Smart Preview stays within
-  0.5/255, but Light cannot take one in today (see below).
-- The preview photo shows the file name `DSC08379.jpg` and kind "image" until the original comes.
-- The member's Light imports previews "in place" from kopanod's media folder; a Light restarted
-  in memory mode gets them back from that folder without the network.
+- The JPEG fallback is a picture to work on, not to judge tones on: same harness, edited 20.0/255.
+- The member's Light keeps the Smart Preview in its own smart previews folder (a throwaway one
+  in `--memory`); kopanod keeps its copy in `media/previews/<project>/`, so a restarted Light
+  gets the photos back without the network.
+- Light runs `photo.setMeta` only with a selection, even when `ids` is given. A stand-in is not
+  selected the way an import is, so the connector now selects the photo first (as for develop).
+  The first run without that took 45 s to show all photos (retries); a Light fix would be to
+  check `ids` in that command's gate.
+- A photo Light has no content hash for (key `name|captured`) cannot be shared as a Smart
+  Preview; Light refuses the export and kopanod sends a JPEG.
+- A kopanod from before this change asks without `accept` and gets a JPEG; one that sees a
+  .lcsp from a newer peer only if it asked for one, so mixed versions still work.
+- Measured with a debug kopanod on a busy PC (Firefox, other agents): edit latencies are 1.5 to
+  3.4 s here against 0.9 to 1.6 s in the earlier release-build runs; S1 and S3 vary as much
+  run to run.
 
-**Light changes that would make previews exact (not made: Light repo untouched)**
+**Smart Previews instead of JPEGs (2026-10-20, Light branch feature/kopano-smart-preview,
+kopanod branch feature/kopanod-lcsp; screenshots in T:/kopano-lab/lcsp/run, fallback run in
+T:/kopano-lab/lcsp/fallback)**
 
-1. `library.addFromSmartPreview {smartPreview: path to .lcsp, contentHash, fileName, captured,
-   fileSize, width, height, kind}`: a photo whose original is offline, keyed by the original's
-   content hash, rendered from the Smart Preview. No alias needed, edits match within 0.5/255.
-2. Smart Previews in `--memory` libraries (today they need a library on disk).
-3. `photo.exportSmartPreview {id, path}` on the control port, so kopanod does not need
-   `lightcraft-cli` beside it to make previews.
-4. `photo.relink` keeps the old kind and format (a JPEG relinked to an ARW stays "image"), which is
-   why the original is imported beside the preview instead of relinked.
+Same test, same 5 ARWs (246.5 MB), Member1's Light starts empty. Accuracy: Alice edits every
+photo (exposure +2, highlights -60) on her RAW, the edit reaches Member1's preview, both windows
+render at 1280 px (`ui.render`), mean absolute difference per channel out of 255.
 
+| | Smart Preview (.lcsp) | JPEG fallback (owner on Light 0.5.0) |
+|---|---|---|
+| Moved to show 5 photos | 2.39 MB (1.0 %) | 3.33 MB (1.4 %) |
+| Made on Alice's side | 0.7 to 1.0 s each, through the window | 2 to 10 s each, lightcraft-cli |
+| First photo / all 5 after joining | 4.0 s / 11.5 s | 13.3 s / 26.2 s |
+| As shot, vs the RAW | 1.12 (worst photo 1.79) | 0.73 (0.88) |
+| Exposure +2, highlights -60, vs the RAW | **1.41** (worst 2.46; 0.69 on 16 px blocks) | **20.0** (worst 25.6) |
+| Alice exposure to Member1 / Member1 contrast to Alice / stars | 1.8 s / 2.8 s / 0.05 s | 1.9 s / 2.4 s / 0.5 s |
+| Original on request (49.4 MB) | 1.5 s transfer, 1.7 s swap; same Light photo id; exposure +1.25, contrast +40, 4 stars kept; still 5 photos | same edits kept; a new photo id |
+| Edit on the original after the swap | 3.1 s | 1.9 s |
+| Carol (valid certificate, not a member) asks for an original | refused at connect (`media: refused 6c1be93e`) | (not run) |
+| End | same head; Member1 1 from original, 4 from preview | same |
+
+Regressions on this branch: kopano-node unit tests 20/20 (1 new), kopano-lab Light tests 5/5
+(1 new); S1 20/20 edits (median 533 ms), both ways, clashes settle, restart catch-up; S3 Light to
+Light exposure 1.8 and 3.4 s, stars 3.7 and 2.1 s, slider drag 3.3 and 1.6 s (two runs), same
+head.
+After merging the kopano-core convergence fix (7270d90): unit tests 20/20, kopano-core 10/10
+and 3/3; S1 20/20 (median 879 ms), all checks pass; S3 exposure 2.3 s, stars 2.0 s, slider 1.9 s,
+same head; S5 again 2.39 MB, 4.5 s / 13.3 s, 1.41/255 edited, takeover with edits and the same
+photo id, Carol refused. One S5 attempt before that stopped at the join ("that teammate is not
+reachable", 12 s after both services started); the next run joined in 2.7 s.
 
 ## 7. Slice "photo": Ubunye Photo windows co-edit through kopanod
 
