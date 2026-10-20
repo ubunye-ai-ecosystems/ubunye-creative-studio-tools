@@ -174,6 +174,11 @@ Regressions on this branch: kopano-node unit tests 20/20 (1 new), kopano-lab Lig
 (1 new); S1 20/20 edits (median 533 ms), both ways, clashes settle, restart catch-up; S3 Light to
 Light exposure 1.8 and 3.4 s, stars 3.7 and 2.1 s, slider drag 3.3 and 1.6 s (two runs), same
 head.
+After merging the kopano-core convergence fix (7270d90): unit tests 20/20, kopano-core 10/10
+and 3/3; S1 20/20 (median 879 ms), all checks pass; S3 exposure 2.3 s, stars 2.0 s, slider 1.9 s,
+same head; S5 again 2.39 MB, 4.5 s / 13.3 s, 1.41/255 edited, takeover with edits and the same
+photo id, Carol refused. One S5 attempt before that stopped at the join ("that teammate is not
+reachable", 12 s after both services started); the next run joined in 2.7 s.
 
 ## 7. Slice "photo": Ubunye Photo windows co-edit through kopanod
 
