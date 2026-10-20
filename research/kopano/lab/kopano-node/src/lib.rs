@@ -76,6 +76,11 @@ pub struct Proj {
     heads: broadcast::Sender<Id>,
     pushed: std::sync::Mutex<HashMap<(Vec<Id>, Id), Arc<(u64, usize, Vec<u8>)>>>,
     following: std::sync::Mutex<HashSet<String>>,
+    /// per followed device: wakes its watch loop (a teammate that connects to us again may have
+    /// restarted, and our own watch of it may hang on a dead connection until QUIC times out)
+    kicks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    /// per device that watches us: the `boot` its last watch carried
+    boots: std::sync::Mutex<HashMap<String, u64>>,
     online: std::sync::Mutex<BTreeMap<String, String>>,
     binding: std::sync::Mutex<Binding>,
     light: std::sync::Mutex<Option<LightConnector>>,
@@ -132,6 +137,8 @@ impl Proj {
             heads: broadcast::channel(64).0,
             pushed: Default::default(),
             following: Default::default(),
+            kicks: Default::default(),
+            boots: Default::default(),
             online: Default::default(),
             binding: std::sync::Mutex::new(std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy)),
             light: Default::default(),
@@ -187,18 +194,43 @@ impl Proj {
     /// reset everything" and pushed that to the team, wiping everyone's edits. Whatever the window
     /// held is not thrown away either: it is kept as its own version (in `kept.json`, off the
     /// main line) so it can be restored by hand, and the project's head is applied into the app.
+    ///
+    /// S8 found the opposite loss: a window that stayed open while kopanod was stopped (or that
+    /// was closed and opened again on its own library meanwhile) holds the person's edits made in
+    /// that time. Those are states the project never had; putting the head back over them threw
+    /// the work away (only `kept.json` had it). So only items whose window state is one the
+    /// project held before (an older value: a fresh window, an old file) are brought to the head;
+    /// a state the project never had is the person's work, stays in the window, and the next save
+    /// takes it like any edit (main for the owner, the member's branch in approve mode).
     fn reconcile(&self, dev: &Device, app: &mut dyn Connector) -> Result<()> {
         let Some(h) = self.head() else { return Ok(()) };
         let root = project::load_version(&self.store, &h)?.tree()?;
         let want = tree::entries(&self.store, root)?;
         let have = app.snapshot()?;
-        let mut changes = Vec::new();
+        let mut differ = Vec::new();
         for (k, item) in &have {
             let id = item.put(&self.store)?;
             if want.get(k).is_some_and(|w| *w != id) {
-                changes.push((k.clone(), Some(id)));
+                differ.push((k.clone(), id));
             }
         }
+        if differ.is_empty() {
+            return Ok(());
+        }
+        // every version this device knows: in approve mode the members' branches too, so the
+        // owner's window that still shows a member's version (she was looking at it when the
+        // window or the service went down) is put back, never saved into main as her own edit
+        let mut heads = vec![h];
+        if approve::on(self) {
+            heads.extend(approve::ref_versions(self));
+        }
+        let seen = seen_states(&self.store, &heads, differ.iter().map(|(k, _)| k))?;
+        let (changes, work): (Vec<_>, Vec<_>) = differ.into_iter().partition(|(k, id)| seen.get(k).is_some_and(|s| s.contains(id)));
+        let work: BTreeSet<String> = work.into_iter().map(|(k, _)| k).collect();
+        if !work.is_empty() {
+            eprintln!("[kopanod] {}: a window was linked again with {} item(s) edited while it was not linked; kept in the window as edits", self.project.id.short(), work.len());
+        }
+        let changes: Vec<(String, Option<Id>)> = changes.into_iter().map(|(k, id)| (k, Some(id))).collect();
         if changes.is_empty() {
             return Ok(());
         }
@@ -211,12 +243,15 @@ impl Proj {
         kopano_core::store::write_atomic(&self.dir.join("kept.json"), &serde_json::to_vec(&list)?)?;
         let info = app.info();
         for (k, id) in &want {
+            if work.contains(k) {
+                continue;
+            }
             let item = Item::get(&self.store, id)?;
             if info.owns(&item.kind) && have.get(k) != Some(&item) {
                 app.apply(k, Some(&item))?;
             }
         }
-        eprintln!("[kopanod] {}: a window was linked again; brought it to the project ({n} item(s) differed, kept as {})", self.project.id.short(), kept.short());
+        eprintln!("[kopanod] {}: a window was linked again; brought it to the project ({n} item(s) held older states, kept as {})", self.project.id.short(), kept.short());
         Ok(())
     }
     pub fn binding(&self) -> Binding {
@@ -355,6 +390,9 @@ pub struct Node {
     endpoint: std::sync::OnceLock<Endpoint>,
     /// photos' files (media.rs), opened when the node starts
     media: std::sync::OnceLock<Arc<media::Media>>,
+    /// a new random number each time the service starts: a watch carries it, so a teammate can
+    /// tell that this service restarted (and that its own watch of us is on a dead connection)
+    boot: u64,
 }
 
 impl Node {
@@ -374,7 +412,7 @@ impl Node {
                 }
             }
         }
-        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default(), media: Default::default() }))
+        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default(), media: Default::default(), boot: rand::random() }))
     }
 
     pub fn project(&self, id: &str) -> Result<Arc<Proj>> {
@@ -424,11 +462,17 @@ impl Node {
             return;
         }
         let node = self.clone();
+        let kick = Arc::new(tokio::sync::Notify::new());
+        p.kicks.lock().unwrap().insert(device.clone(), kick.clone());
         tokio::spawn(async move {
             let mut wait = 1u64;
             loop {
                 let started = Instant::now();
-                if let Err(e) = node.watch(&p, &device).await {
+                let r = tokio::select! {
+                    r = node.watch(&p, &device) => r,
+                    _ = kick.notified() => Err(anyhow!("the teammate's service restarted; watching it anew")),
+                };
+                if let Err(e) = r {
                     if p.online.lock().unwrap().remove(&device).is_some() {
                         node.emit(json!({"event": "teammate", "project": p.project.id.hex(), "device": device, "online": false}));
                     }
@@ -437,8 +481,12 @@ impl Node {
                 if started.elapsed().as_secs() > 60 {
                     wait = 1;
                 }
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-                wait = (wait * 2).min(30);
+                // S8: a teammate whose service restarted connects to us at once; waiting out the
+                // back-off (or QUIC's idle timeout on the dead connection) kept its edits away 45 s
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(wait)) => wait = (wait * 2).min(30),
+                    _ = kick.notified() => wait = 1,
+                }
             }
         });
     }
@@ -460,12 +508,13 @@ impl Node {
         p.online.lock().unwrap().insert(device.to_string(), their.body.name.clone());
         p.remember(&their);
         self.emit(json!({"event": "teammate", "project": p.project.id.hex(), "device": device, "name": their.body.name, "online": true}));
-        let req = if approve::on(p) {
+        let mut req = if approve::on(p) {
             approve::watch_request(p)
         } else {
             let have: Vec<String> = p.head().into_iter().map(|h| h.hex()).collect();
             json!({"op": "watch", "have": have})
         };
+        req["boot"] = json!(self.boot);
         write_frame(&mut s, &serde_json::to_vec(&req)?).await?;
         loop {
             let note: Value = serde_json::from_slice(&read_frame(&mut r).await?)?;
@@ -870,6 +919,16 @@ impl Hub {
         loop {
             let Ok(req) = read_frame(&mut recv).await else { break };
             let req: Value = serde_json::from_slice(&req)?;
+            if let Some(boot) = req.get("boot").and_then(Value::as_u64) {
+                // S8: its service restarted. Our own watch of it may hang on the dead connection
+                // until QUIC gives up (45 s on this PC) or wait out a back-off: start it again
+                // now. Only a restart changes `boot`, so two devices never ping-pong.
+                if p.boots.lock().unwrap().insert(dev.clone(), boot).is_some_and(|old| old != boot) {
+                    if let Some(k) = p.kicks.lock().unwrap().get(&dev) {
+                        k.notify_waiters();
+                    }
+                }
+            }
             match req.get("op").and_then(|o| o.as_str()) {
                 Some("watch") if approve::on(&p) => {
                     let mut rx = p.heads.subscribe();
@@ -1188,6 +1247,34 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
         }
         o => bail!("unknown op {o}"),
     }
+}
+
+/// Every state (item id) the project held for each of `keys`, in any version under `heads`: what
+/// a window that is linked again may hold without it being new work (`Proj::reconcile`).
+pub(crate) fn seen_states<'a>(store: &dyn ObjectStore, heads: &[Id], keys: impl Iterator<Item = &'a String>) -> Result<HashMap<String, HashSet<Id>>> {
+    let keys: Vec<&String> = keys.collect();
+    let mut out: HashMap<String, HashSet<Id>> = HashMap::new();
+    let mut done: HashSet<Id> = HashSet::new();
+    for (i, h) in heads.iter().enumerate() {
+        // the head's history must be whole; another ref's may still be on its way: skip it
+        let hist = match project::history(store, &[*h]) {
+            Ok(x) => x,
+            Err(e) if i == 0 => return Err(e),
+            Err(_) => continue,
+        };
+        for (vid, v) in hist {
+            if !done.insert(vid) {
+                continue;
+            }
+            let root = v.tree()?;
+            for k in &keys {
+                if let Some(id) = tree::get(store, root, k)? {
+                    out.entry((*k).clone()).or_default().insert(id);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The token apps must show. Created once, readable by this user only (a file next to the key).

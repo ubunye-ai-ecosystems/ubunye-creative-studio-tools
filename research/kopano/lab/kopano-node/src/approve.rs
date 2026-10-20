@@ -335,7 +335,7 @@ fn adopt(node: &Node, p: &Proj, v: &Id) -> Result<()> {
 // ---- sync ------------------------------------------------------------------------------------
 
 /// The versions every known ref points at (forks included, so nothing becomes unreachable).
-fn ref_versions(p: &Proj) -> Vec<Id> {
+pub(crate) fn ref_versions(p: &Proj) -> Vec<Id> {
     let mut v: BTreeSet<Id> = p.review.refs().iter().filter_map(|r| wf::load_ref(&p.store, r).ok()).filter_map(|s| Id::parse(&s.update.body.version).ok()).filter(|v| p.store.has(v)).collect();
     v.extend(p.head());
     v.into_iter().collect()
@@ -1268,6 +1268,77 @@ mod tests {
         assert_eq!(app.photos["photo-0001"].state["develop"]["contrast"], json!(20.0), "the other setting stays as merged");
         assert!(clashes(&p)?.is_empty());
         assert!(resolve(&a, &p, c["clash"].as_str().unwrap(), "a").await.is_err(), "settled once");
+        Ok(())
+    }
+
+    /// Link the window again (what a restarted kopanod or a restarted app does first).
+    fn relink(t: &Team, i: usize) -> Result<ToyEditor> {
+        let p = t.p(i);
+        let mut app = p.app()?;
+        tokio::task::block_in_place(|| p.reconcile(&t.nodes[i].device, &mut app))?;
+        p.save_app(&app)?;
+        Ok(app)
+    }
+
+    fn set_in_window(t: &Team, i: usize, key: &str, field: &str, v: Value) -> Result<()> {
+        let p = t.p(i);
+        let mut app = p.app()?;
+        *app.photos.get_mut(key).unwrap().state.pointer_mut(&format!("/{}", field.replace('.', "/"))).unwrap() = v;
+        p.save_app(&app)
+    }
+
+    /// S8: edits made in the window while kopanod was not running are the person's work: linking
+    /// the window again keeps them (and the next save sends them for review). Old states (a
+    /// fresh window, an old file) are still put back to the project's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_window_linked_again_keeps_edits_made_while_unlinked() -> Result<()> {
+        let t = team("relink").await?;
+        t.set(1, "photo-0002", "develop.contrast", 12.0).await?; // now in his history
+        set_in_window(&t, 1, "photo-0001", "develop.exposure", json!(0.9))?; // made offline
+        set_in_window(&t, 1, "photo-0002", "develop.contrast", json!(0.0))?; // an older state
+        relink(&t, 1)?;
+        assert_eq!(t.get(1, "photo-0001", "develop.exposure"), 0.9, "new work stays in the window");
+        assert_eq!(t.get(1, "photo-0002", "develop.contrast"), 12.0, "an old state is put back");
+        let kept = std::fs::read(t.p(1).dir.join("kept.json")).map(|b| serde_json::from_slice::<Vec<String>>(&b).unwrap().len()).unwrap_or(0);
+        assert_eq!(kept, 1, "the old state is kept aside as before");
+        // the next save (as the poll does) sends it for review
+        let p = t.p(1);
+        {
+            let _w = p.write.lock().await;
+            let mut repo = p.repo(&t.nodes[1].device)?;
+            let mut app = p.app()?;
+            repo.save(&mut app, "edit")?;
+            p.set_head(repo.head)?;
+            sign_mine(&t.nodes[1], &p)?;
+        }
+        t.both().await?;
+        assert_eq!(t.review(0)["pending"][0]["photos"], 2, "{}", t.review(0));
+        Ok(())
+    }
+
+    /// S8: the owner's window still shows a member's version (she was looking at it when the
+    /// window or kopanod went down, so the view was never ended): linking it again must put main
+    /// back, never save his version into main as her own edit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_members_version_left_in_the_owners_window_is_not_approved() -> Result<()> {
+        let t = team("leftview").await?;
+        t.set(1, "photo-0001", "develop.exposure", 1.5).await?;
+        t.both().await?;
+        let main0 = t.main(0);
+        view(&t.nodes[0], &t.p(0), "acct-m1", None, "member").await?;
+        assert_eq!(t.get(0, "photo-0001", "develop.exposure"), 1.5);
+        *t.p(0).review.viewing.lock().unwrap() = None; // kopanod restarted: the view is forgotten
+        relink(&t, 0)?;
+        assert_eq!(t.get(0, "photo-0001", "develop.exposure"), 0.0, "main is back in her window");
+        let p = t.p(0);
+        {
+            let _w = p.write.lock().await;
+            let mut repo = p.repo(&t.nodes[0].device)?;
+            let mut app = p.app()?;
+            assert!(repo.save(&mut app, "edit")?.is_none(), "nothing to save");
+        }
+        assert_eq!(t.main(0), main0, "main did not move");
+        assert_eq!(t.review(0)["pending"].as_array().unwrap().len(), 1, "still waiting for her");
         Ok(())
     }
 
