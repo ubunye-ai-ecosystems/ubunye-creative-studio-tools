@@ -250,19 +250,70 @@ conditions).
 
 **Limits found (honest)**
 
-- Tiles travel raw (a 256x256 RGBA tile is 256 KB); Photo's own bundle keeps them zstd. A join
-  of this document moves about 25 MB, fine on a LAN, slow over a relay. Compressed tile blobs
-  would need a second hash per tile.
+- Tiles travelled raw (256 KB each, about 25 MB per join). Fixed below ("Tiles travel packed").
 - Photo's `kopano.objects` serves the latest export only, so while someone paints fast an
   export and its object fetch can disagree ("Photo has no object"). The connector exports again
-  (up to 12 times); under 40 strokes a second a save can still be put off a few seconds. A fix
-  in Photo: let `kopano.objects` also serve the previous export.
+  (up to 12 times; 11 to 15 times per S6 run, each a few ms). Serving the previous export too
+  was tried and measured, and is NOT the fix: see "Tiles travel packed".
 - kopanod restarting while Photo stays open treats the open window like a fresh one: edits made
   while kopanod was down go to `kept.json`, not to the team.
 - The document's tab name and file name stay local ("Blank" in Member1's window).
 - Layers made in a window before any update from the team get random uids that the window does
   not store (only an update writes the uid map into the document); a reconnect then sees them as
   new layers, keeps the old ones in `kept.json` and brings the project's back.
+
+### Tiles travel packed (2026-10-20)
+
+Code: `photo_binding.rs` (publish, `packed_offer`, `fetch_tiles`, `fetch_one`), the
+`tiles-packed` request in `lib.rs`, `pack`/`unpack`/`keep_packed` in `kopano-lab/src/photo.rs`.
+media.rs is unchanged: its gate already asks `photo_binding::serves`.
+
+- Items do not change. A tile item still names its raw pixels by BLAKE3, so merges, clashes and
+  older peers see the same identity.
+- The connector keeps the zstd bytes Photo hands it (`media/zst/<raw>.zst`): packing costs
+  nothing. A tile that came in raw is packed once when it is published.
+- The node offers each packed blob under its own hash. Before fetching, a receiver asks the
+  teammate `{"op": "tiles-packed", "hashes": [...]}` on the member-checked sync channel (in
+  parallel with opening the blobs connection) and gets raw hash -> packed hash.
+- Integrity: iroh-blobs checks the packed hash on the way in; the receiver unpacks (at most
+  1 GiB) and checks the RAW hash from the signed version before the tile is written. The answer
+  needs no signature of its own: a wrong one costs one wasted fetch, then that tile is fetched
+  raw. Hashes in the answer are read defensively (iroh's own parser panics on some bad lengths).
+- Membership: the gate serves a packed blob exactly when it would serve its raw object to that
+  device.
+- Older peers: an older kopanod refuses the question and everything is fetched raw; an older
+  receiver never asks. `KOPANO_PHOTO_RAW_TILES=1` turns packing off (the "before" below).
+
+**Real test (S6, this PC, two Photo windows, two kopanod, the owner's DSC08379 as a 3000x2000
+document; screenshots T:/kopano-lab/photo-tiles/shots; runs T:/kopano-lab/photo-tiles)**
+
+| | raw (before) | packed (after) |
+|---|---|---|
+| Join: moved for 97 tiles (25.2 MB of pixels) | 25.26 MB | 11.59 MB |
+| Alice's stroke, 4 tiles, to Member1 | 1.05 MB | 0.06 MB |
+| Member1's stroke, 6 tiles, to Alice | 1.58 MB | 0.05 MB |
+| Whole run, both sides received | 41.3 MB | 11.8 MB |
+| Join: window became Alice's document | 1.8, 2.0 s | 1.45 to 1.72 s (5 of 6 runs) |
+| Stroke Alice -> Member1 / Member1 -> Alice | 1.0 s / 1.1 to 1.2 s | 1.0 to 1.3 s / 1.1 to 1.4 s |
+| Both paint at once | 0 clashes | 0 clashes, settled 1.1 to 2.0 s |
+| Member1 paints ~200 strokes while Alice moves Exposure | 0 tiles lost | 0 tiles lost (6 runs) |
+| Member1's Photo closed and reopened | team edits back 4.6 to 4.8 s | 3.9 to 4.8 s, Alice unchanged |
+
+One packed run's join took 5.6 s: the `tiles-packed` question waited 2.5 s for its connection
+(every other run: under 10 ms). Packed tiles unpack in about 3 ms each. Mixed versions: an older
+kopanod as Alice (sender) or as Member1 (receiver) gives the raw numbers, same head, windows
+match, 0 clashes, 0 refusals.
+
+**Serving Photo's previous export was tried and reverted.** With `kopano.objects` also serving
+the export before the newest (Photo fork branch `feature/kopano-prev-export`, commit 50570b72,
+reverted in d2a3ad2f), the connector no longer exports again on "no object" and reads a
+snapshot one stroke old while the user paints. Its update is then refused by Photo every time:
+6 to 7 refused updates per S6 run instead of 0. And the refused-update path lost tiles: in
+step 5, 10 or 11 of Member1's tiles were replaced by older versions in both windows (same head,
+0 clashes) in 6 of 25 runs, with the old kopanod (1 of 9) and the new one alike. With the
+unchanged Photo the refused path is rare (0 refused updates in 10 runs here) and nothing was
+lost. **Open: the refused-update path in `Node::integrate` can lose a user's newest tiles**;
+sim_fuzz does not model an app that refuses updates. Until it is found, keep refusals rare.
 
 ## 8. Slice "Film": one film cut from two computers
 

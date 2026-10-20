@@ -10,7 +10,10 @@ opened again on the untouched original: the team's edits must come back, nothing
 
 Windows are driven only through Photo's control channel (the same commands its own UI runs).
 Usage: python s6_photo.py <photocraft.exe> <kopanod.exe> <work dir> <alice lab dir> <m1 lab dir>
-         --doc <owner .pcraft> [--photo-base 18400] [--port-base 47130]"""
+         --doc <owner .pcraft> [--photo-base 18400] [--port-base 47130]
+         [--kopanod-a <exe>] [--kopanod-b <exe>]  (an older kopanod on one side: compatibility)
+         [--raw]  (KOPANO_PHOTO_RAW_TILES=1 on both: tiles travel raw, for before/after)
+MB moved is what the receiving kopanod logs per tile fetch (payload plus verification data)."""
 import json, os, shutil, socket, subprocess, sys, time
 
 PHOTO, K, W, ALICE, M1 = sys.argv[1:6]
@@ -18,7 +21,9 @@ opt = lambda n, d: sys.argv[sys.argv.index(n) + 1] if n in sys.argv else d
 DOC = opt('--doc', None)
 PB, KB = int(opt('--photo-base', 18400)), int(opt('--port-base', 47130))
 PP, KP = {'a': PB + 1, 'b': PB + 2}, {'a': KB + 1, 'b': KB + 2}
-res = {}
+KEXE = {'a': opt('--kopanod-a', K), 'b': opt('--kopanod-b', K)}
+RAW = '--raw' in sys.argv
+res = {'kopanod': KEXE, 'raw_tiles': RAW}
 W = os.path.abspath(W)
 
 
@@ -189,6 +194,33 @@ def binding(who):
     return {'kind': 'photo-control', 'port': PP[who], 'token_file': f'{W}/photo-{who}.token'}
 
 
+def moved_kb(who):
+    """KB this kopanod received for tiles so far (its 'KB moved' log lines)."""
+    n = 0
+    for l in open(f'{W}/{who}/kopanod.log', encoding='utf-8', errors='replace'):
+        if ' KB moved for ' in l:
+            try:
+                n += int(l.split('): ', 1)[1].split(' KB moved', 1)[0])
+            except Exception:
+                pass
+    return n
+
+
+class Moved:
+    """MB both kopanods received during a step."""
+
+    def __enter__(self):
+        self.k = {w: moved_kb(w) for w in 'ab'}
+        return self
+
+    def mb(self, wait=1.0):
+        time.sleep(wait)  # the last fetch's log line
+        return {f'{w}_received_mb': round((moved_kb(w) - self.k[w]) / 1000, 2) for w in 'ab'}
+
+    def __exit__(self, *a):
+        return False
+
+
 def log_count(who, text):
     return open(f'{W}/{who}/kopanod.log', encoding='utf-8', errors='replace').read().count(text)
 
@@ -202,7 +234,8 @@ procs, wins = [], {}
 try:
     for who in 'ab':
         log = open(f'{W}/{who}/kopanod.log', 'w')
-        procs.append(subprocess.Popen([K, 'run', '--home', f'{W}/{who}', '--api-port', str(KP[who])], stdout=log, stderr=log))
+        env = dict(os.environ, KOPANO_PHOTO_RAW_TILES='1') if RAW else None
+        procs.append(subprocess.Popen([KEXE[who], 'run', '--home', f'{W}/{who}', '--api-port', str(KP[who])], stdout=log, stderr=log, env=env))
     wa, wb = Photo('a', True), Photo('b', False)
     wins = {'a': wa, 'b': wb}
     res['start'] = {'alice': shape(wa.export())[2], 'alice_tiles': len(shape(wa.export())[1]), 'member1': shape(wb.export())[2], 'member1_tiles': len(shape(wb.export())[1])}
@@ -220,9 +253,10 @@ try:
     pid = made['project']
     res['create'] = {'items': made['items'], 'ms': round((time.time() - t0) * 1000)}
     t0 = time.time()
+    mv = Moved().__enter__()
     kcall('b', op='join', project=pid, **{'from': adev}, app=binding('b'))
     ms = wait_for(lambda: same(wa, wb), 120)
-    res['join'] = {'window_became_alices_document_ms': ms, 'total_ms': round((time.time() - t0) * 1000),
+    res['join'] = {'window_became_alices_document_ms': ms, 'total_ms': round((time.time() - t0) * 1000), **mv.mb(),
                    'tiles_moved': len(shape(wb.export())[1]), 'kopanod_b_tile_fetch_log': [l.strip() for l in open(f'{W}/b/kopanod.log', errors='replace') if 'fetched from teammates' in l][:3]}
     time.sleep(1.5)
     wa.shot('1-joined'); wb.shot('1-joined')
@@ -237,16 +271,20 @@ try:
     wa.cmd('layer.new.layer', name='Retouch')
     res['a_to_b_new_layer_ms'] = wait_for(lambda: same(wa, wb), 30)
     before = set(shape(wa.export())[1])
+    mv = Moved().__enter__()
     wa.cmd('paint.stroke', points=[[400, 1880, 1], [800, 1930, 1], [1200, 1890, 1]], size=90, color='#ffd23f')
     new_tiles = len(set(shape(wa.export())[1]) - before)
-    res['a_to_b_brush_stroke'] = {'ms': wait_for(lambda: same(wa, wb), 30), 'tiles_changed': new_tiles, 'tiles_in_document': len(shape(wa.export())[1])}
+    res['a_to_b_brush_stroke'] = {'ms': wait_for(lambda: same(wa, wb), 30), 'tiles_changed': new_tiles, 'tiles_in_document': len(shape(wa.export())[1]), **mv.mb()}
     time.sleep(1.5)
     wa.shot('2-alice-brush-stroke'); wb.shot('2-alice-brush-stroke')
 
     # 3. Member1 paints on the same layer in his window; it must show in Alice's
     wb.cmd('layer.select', layer=layer_id(wb, 'Retouch'))
+    before = set(shape(wb.export())[1])
+    mv = Moved().__enter__()
     wb.cmd('paint.stroke', points=[[1500, 600, 1], [2100, 700, 1], [2600, 650, 1]], size=80, color='#ff3f9a')
-    res['b_to_a_brush_stroke_ms'] = wait_for(lambda: same(wa, wb), 30)
+    new_tiles = len(set(shape(wb.export())[1]) - before)
+    res['b_to_a_brush_stroke'] = {'ms': wait_for(lambda: same(wa, wb), 30), 'tiles_changed': new_tiles, **mv.mb()}
     time.sleep(1.5)
     wa.shot('3-member1-brush-stroke'); wb.shot('3-member1-brush-stroke')
 
@@ -281,6 +319,11 @@ try:
     res['edit_while_changes_come_in'] = {'member1_strokes': strokes, 'settled_ms': ms, 'retries_in_kopanod_b': log_count('b', 'trying again') - retries0,
                                          'retries_in_kopanod_a': log_count('a', 'trying again'), 'exposure_in_member1_window': adj,
                                          'member1_tiles_lost': len(painted - final)}
+    time.sleep(5)
+    later = set(shape(wa.export())[1]) | set(shape(wb.export())[1])
+    res['edit_while_changes_come_in']['member1_tiles_lost_5s_later'] = len(painted - later)
+    if painted - final:
+        json.dump({'painted': sorted(painted), 'final_a': sorted(final), 'b_now': sorted(shape(wb.export())[1])}, open(f'{W}/lost-tiles.json', 'w'))
     time.sleep(1.5)
     wa.shot('5-edit-while-changes-come-in'); wb.shot('5-edit-while-changes-come-in')
 
@@ -314,6 +357,9 @@ try:
     res['windows_match'] = same(wa, wb)
     res['clashes_total'] = clashes('a') + clashes('b')
     res['media_refusals_logged'] = {w: log_count(w, 'media: refused') for w in 'ab'}
+    res['packed_tiles_not_usable'] = {w: log_count(w, 'not usable, fetching it raw') for w in 'ab'}
+    res['received_mb_total'] = {w: round(moved_kb(w) / 1000, 2) for w in 'ab'}
+    res['photo_no_object_retries'] = {w: log_count(w, 'Photo has no object') for w in 'ab'}
 finally:
     for w in wins.values():
         w.quit()

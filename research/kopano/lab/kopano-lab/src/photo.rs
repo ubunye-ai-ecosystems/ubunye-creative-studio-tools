@@ -336,6 +336,7 @@ impl PhotoConnector {
                 Err(e) if tries < 12 && format!("{e:#}").contains("Photo has no object") => {
                     // straight away first: the export and the fetch are quick, a stroke is not
                     tries += 1;
+                    eprintln!("[photo] Photo has no object its export named (try {tries}); exporting again");
                     if tries > 3 {
                         std::thread::sleep(std::time::Duration::from_millis(40 * tries));
                     }
