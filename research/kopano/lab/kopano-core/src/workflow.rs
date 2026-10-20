@@ -41,6 +41,18 @@ pub fn branch_of(account: &str) -> String {
     format!("branch/{account}")
 }
 
+/// `review/<account>`: an approver's "declined" mark. It points at the version of that member's
+/// branch the approver looked at and did not take; main stays as it was and the member's branch
+/// keeps the work. Moved by approvers only, under the same rules as main.
+pub fn review_of(account: &str) -> String {
+    format!("review/{account}")
+}
+
+/// Refs that only an approver may move: main and the review marks.
+pub fn approver_ref(name: &str) -> bool {
+    name == MAIN || name.starts_with("review/")
+}
+
 // ---------------------------------------------------------------- members log
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -307,11 +319,11 @@ pub fn check_ref(store: &dyn ObjectStore, project: &Project, current: &Members, 
         bail!("ref update for another project");
     }
     let acct = &s.cert.body.account;
-    if u.name == MAIN {
+    if approver_ref(&u.name) {
         let cited: Vec<Id> = u.members.iter().filter_map(|m| Id::parse(m).ok()).collect();
         let at = members(store, project, &member_closure(store, &cited))?;
         if !at.is_approver(acct) || at.blocked.contains(&s.cert.body.device) {
-            bail!("{} may not approve into main", s.cert.body.name);
+            bail!("{} may not approve into {}", s.cert.body.name, u.name);
         }
     } else if u.name == branch_of(acct) {
         if !current.device_ok(&s.cert) {
@@ -349,7 +361,7 @@ pub fn tips(store: &dyn ObjectStore, project: &Project, current: &Members, known
         }
     }
     let replaced: BTreeSet<String> = valid.values().filter_map(|(u, _)| u.previous.clone()).collect();
-    let still = |u: &RefUpdate, c: &DeviceCert| u.name != MAIN || (current.is_approver(&c.body.account) && !current.blocked.contains(&c.body.device));
+    let still = |u: &RefUpdate, c: &DeviceCert| !approver_ref(&u.name) || (current.is_approver(&c.body.account) && !current.blocked.contains(&c.body.device));
     let mut out: BTreeMap<String, (Id, RefUpdate)> = BTreeMap::new();
     let mut best: BTreeMap<String, (bool, u64, String)> = BTreeMap::new();
     let mut forks = vec![];
@@ -395,7 +407,15 @@ pub fn verify_version_v2(store: &dyn ObjectStore, project: &Project, members: &M
 /// An approver accepts `branch` into `main`: a merge version with both parents. Where both sides
 /// changed the same setting, the approver's choice (`prefer_branch`) decides; clash records are
 /// not written into main (the decision is the record, in the message).
+#[allow(clippy::too_many_arguments)]
 pub fn approve(store: &dyn ObjectStore, project: &Project, main: &Id, branch: &Id, prefer_branch: bool, mergeable: &dyn merge::MergePolicy, cert: &DeviceCert, key: &DeviceKey) -> Result<(Id, usize)> {
+    approve_with(store, project, main, branch, &|_: &str| prefer_branch, mergeable, cert, key)
+}
+
+/// `approve` with a choice per clashing item: `prefer_branch(key)` true takes the member's value
+/// for that item, false keeps main's. Settings only one side changed are merged either way.
+#[allow(clippy::too_many_arguments)]
+pub fn approve_with(store: &dyn ObjectStore, project: &Project, main: &Id, branch: &Id, prefer_branch: &dyn Fn(&str) -> bool, mergeable: &dyn merge::MergePolicy, cert: &DeviceCert, key: &DeviceKey) -> Result<(Id, usize)> {
     if project::is_ancestor(store, branch, main)? {
         bail!("nothing to approve: main already has this work");
     }
@@ -414,7 +434,10 @@ pub fn approve(store: &dyn ObjectStore, project: &Project, main: &Id, branch: &I
             changes.push((k, None));
         }
     }
+    let mut theirs_n = 0;
     for c in &out.conflicts {
+        let prefer_branch = prefer_branch(&c.key);
+        theirs_n += usize::from(prefer_branch);
         let pick = match (c.mine, c.theirs) {
             (Some(m), Some(t)) => {
                 let (mi, ti) = (crate::project::Item::get(store, &m)?, crate::project::Item::get(store, &t)?);
@@ -445,7 +468,7 @@ pub fn approve(store: &dyn ObjectStore, project: &Project, main: &Id, branch: &I
     }
     let root = tree::update(store, out.root, changes)?;
     let n = out.conflicts.len();
-    let msg = if n == 0 { "Approved".to_string() } else { format!("Approved, {n} clash(es) decided ({})", if prefer_branch { "theirs" } else { "main" }) };
+    let msg = if n == 0 { "Approved".to_string() } else { format!("Approved, {n} clash(es) decided ({theirs_n} theirs, {} main)", n - theirs_n) };
     let v = project::commit(store, project, vec![*main, *branch], root, &msg, cert, key)?;
     store.flush()?;
     Ok((v, n))

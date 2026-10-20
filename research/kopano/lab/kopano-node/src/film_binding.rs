@@ -731,6 +731,7 @@ async fn take_in(node: &Arc<Node>, p: &Arc<Proj>) -> Result<usize> {
         };
         if v.is_some() {
             p.set_head(repo.head)?;
+            crate::approve::sign_mine(node, p)?;
         }
         s.conn.snapshot()?;
         let mut attached = 0;

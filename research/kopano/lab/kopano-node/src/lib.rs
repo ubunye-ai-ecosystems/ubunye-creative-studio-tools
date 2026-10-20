@@ -17,6 +17,7 @@
 
 #[path = "../../kopano-lab/src/keystore.rs"]
 pub mod keystore;
+pub mod approve;
 pub mod film_binding;
 pub mod media;
 pub mod photo_binding;
@@ -84,6 +85,8 @@ pub struct Proj {
     media: std::sync::OnceLock<Arc<media::Media>>,
     /// a Photo window bound to this project (photo_binding.rs)
     photo: photo_binding::Slot,
+    /// "I approve changes" projects: refs, members log, review (approve.rs)
+    pub review: approve::State,
 }
 
 /// Which app holds this project's items on this device.
@@ -135,6 +138,7 @@ impl Proj {
             film: Default::default(),
             media: Default::default(),
             photo: Default::default(),
+            review: approve::State::load(dir),
         })
     }
     /// Run `f` against this project's app: the toy editor file, or Light (connected on first use
@@ -293,10 +297,24 @@ impl Proj {
         if cert.body.device != hex::encode(remote_id) {
             bail!("certificate is for another device than the one connecting");
         }
-        if !self.project.genesis.members.contains_key(&cert.body.account) {
+        if !self.is_member_device(cert) {
             bail!("{} is not a member of this project", cert.body.name);
         }
         Ok(())
+    }
+    /// On the project now: the genesis members, plus (approve mode) the signed members log, a
+    /// blocked device refused.
+    pub fn is_member_device(&self, cert: &DeviceCert) -> bool {
+        if self.project.approve_mode() {
+            return approve::members(self).is_ok_and(|m| m.device_ok(cert));
+        }
+        self.project.genesis.members.contains_key(&cert.body.account)
+    }
+    pub fn is_member_account(&self, account: &str) -> bool {
+        if self.project.approve_mode() {
+            return approve::members(self).is_ok_and(|m| m.is_member(account));
+        }
+        self.project.genesis.members.contains_key(account)
     }
     pub fn peers(&self) -> BTreeSet<String> {
         std::fs::read(self.dir.join("peers.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
@@ -442,11 +460,25 @@ impl Node {
         p.online.lock().unwrap().insert(device.to_string(), their.body.name.clone());
         p.remember(&their);
         self.emit(json!({"event": "teammate", "project": p.project.id.hex(), "device": device, "name": their.body.name, "online": true}));
-        let have: Vec<String> = p.head().into_iter().map(|h| h.hex()).collect();
-        write_frame(&mut s, &serde_json::to_vec(&json!({"op": "watch", "have": have}))?).await?;
+        let req = if approve::on(p) {
+            approve::watch_request(p)
+        } else {
+            let have: Vec<String> = p.head().into_iter().map(|h| h.hex()).collect();
+            json!({"op": "watch", "have": have})
+        };
+        write_frame(&mut s, &serde_json::to_vec(&req)?).await?;
         loop {
             let note: Value = serde_json::from_slice(&read_frame(&mut r).await?)?;
             let z = read_frame(&mut r).await?;
+            if approve::on(p) {
+                let t = Instant::now();
+                if let Some((what, conflicts, photos)) = approve::take(self, p, &note, &z).await? {
+                    self.emit(json!({"event": "synced", "project": p.project.id.hex(), "from": their.body.name, "head": p.head().map(|h| h.short()),
+                        "how": what, "clashes": conflicts, "photos": photos, "bytes": z.len(), "apply_ms": t.elapsed().as_millis() as u64,
+                        "sent_ms": note.get("ms").and_then(|m| m.as_u64()), "now_ms": now_ms()}));
+                }
+                continue;
+            }
             let Some(h) = note.get("head").and_then(|h| h.as_str()).and_then(|h| Id::parse(h).ok()) else { continue };
             let t = Instant::now();
             let raw = note.get("raw").and_then(|n| n.as_u64()).unwrap_or(0);
@@ -550,8 +582,10 @@ impl Node {
             let v = repo.save(&mut app, "edit")?;
             p.save_app(&app)?;
             p.set_head(repo.head)?;
+            approve::sign_mine(self, p)?;
             v
         };
+        approve::notify(self, p);
         if let Some(h) = p.head() {
             let _ = p.heads.send(h);
         }
@@ -583,14 +617,22 @@ impl Node {
                 if p.head().is_none() {
                     continue;
                 }
+                // the owner is looking at a member's version in this window: nothing to save
+                if p.review.viewing().is_some() {
+                    continue;
+                }
                 let r = {
                     let _w = p.write.lock().await;
                     (|| -> Result<Option<usize>> {
+                        if p.review.viewing().is_some() {
+                            return Ok(None);
+                        }
                         let before = p.head();
                         let mut repo = p.repo(&node.device)?;
                         let v = p.with_app(&node.device, |app| repo.save(app, p.binding().edit_message()))?;
                         if v.is_some() {
                             p.set_head(repo.head)?;
+                            approve::sign_mine(&node, &p)?;
                         }
                         Ok(v.map(|_| p.photos_changed(before, p.head())))
                     })()
@@ -601,6 +643,7 @@ impl Node {
                             let _ = p.heads.send(h);
                         }
                         node.emit(json!({"event": "saved", "project": p.project.id.hex(), "head": p.head().map(|h| h.short()), "photos": photos, "now_ms": now_ms()}));
+                        approve::notify(&node, &p);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -614,11 +657,16 @@ impl Node {
 
     /// Start a project from what the app has now. `members`: account -> role and lanes.
     pub fn create_project(self: &Arc<Self>, name: &str, binding: Binding, members: BTreeMap<String, project::Member>) -> Result<Arc<Proj>> {
+        self.create_project_mode(name, binding, members, None)
+    }
+
+    /// `create_project` with the project's mode: "live" (None) or "approve" (approve.rs).
+    pub fn create_project_mode(self: &Arc<Self>, name: &str, binding: Binding, members: BTreeMap<String, project::Member>, mode: Option<&str>) -> Result<Arc<Proj>> {
         let tmp = self.device.home.join("projects").join(format!("new-{}", hex::encode(rand::random::<[u8; 4]>())));
         std::fs::create_dir_all(&tmp)?;
         let pid = {
             let store = RedbStore::open(tmp.join("kopano.redb"))?;
-            let pr = Project::create(&store, name, vec![self.device.cert.signer.clone()], &self.device.cert, &self.device.key, members)?;
+            let pr = Project::create_with_mode(&store, name, vec![self.device.cert.signer.clone()], &self.device.cert, &self.device.key, members, mode)?;
             pr.id
         };
         std::fs::write(tmp.join("project"), pid.hex())?;
@@ -634,6 +682,7 @@ impl Node {
             let mut repo = p.repo(&self.device)?;
             p.with_app(&self.device, |app| repo.save(app, "Project started"))?;
             p.set_head(repo.head)?;
+            approve::sign_mine(self, &p)?;
         }
         self.projects.write().unwrap().insert(pid, p.clone());
         self.watch_app(p.clone());
@@ -822,6 +871,21 @@ impl Hub {
             let Ok(req) = read_frame(&mut recv).await else { break };
             let req: Value = serde_json::from_slice(&req)?;
             match req.get("op").and_then(|o| o.as_str()) {
+                Some("watch") if approve::on(&p) => {
+                    let mut rx = p.heads.subscribe();
+                    let mut pusher = approve::Pusher::new(&p, &req);
+                    loop {
+                        if let Some((note, z)) = pusher.next(&p)? {
+                            write_frame(&mut send, &serde_json::to_vec(&note)?).await?;
+                            write_frame(&mut send, &z).await?;
+                        }
+                        match rx.recv().await {
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    break;
+                }
                 Some("watch") => {
                     let mut rx = p.heads.subscribe();
                     let mut known: Vec<Id> = req.get("have").and_then(|h| h.as_array()).into_iter().flatten().filter_map(|h| h.as_str().and_then(|s| Id::parse(s).ok())).filter(|h| p.store.has(h)).collect();
@@ -882,8 +946,14 @@ impl Hub {
 /// E19/E20 compact payload: versions the watcher lacks, oldest first, changed tree nodes as deltas
 /// against the same place in the parent tree, all deflated. (records, raw bytes, compressed)
 fn compact_payload(p: &Proj, have: &[Id]) -> Result<(u64, usize, Vec<u8>)> {
+    compact_payload_of(p, have, &p.head().into_iter().collect::<Vec<_>>(), &[])
+}
+
+/// `compact_payload` for several heads, with `extra` objects (ref updates, members entries)
+/// appended whole (approve.rs). Receivers store every record under its hash either way.
+pub(crate) fn compact_payload_of(p: &Proj, have: &[Id], heads: &[Id], extra: &[Vec<u8>]) -> Result<(u64, usize, Vec<u8>)> {
     let known: BTreeSet<Id> = project::history(&p.store, have)?.into_iter().map(|(id, _)| id).collect();
-    let mut versions: Vec<(Id, project::Version)> = project::history(&p.store, &p.head().into_iter().collect::<Vec<_>>())?.into_iter().filter(|(id, _)| !known.contains(id)).collect();
+    let mut versions: Vec<(Id, project::Version)> = project::history(&p.store, heads)?.into_iter().filter(|(id, _)| !known.contains(id)).collect();
     versions.reverse();
     let mut sent: HashSet<Id> = HashSet::new();
     let mut payload: Vec<u8> = Vec::new();
@@ -928,6 +998,10 @@ fn compact_payload(p: &Proj, have: &[Id]) -> Result<(u64, usize, Vec<u8>)> {
         }
         put(0, &p.store.get(vid)?, &mut payload);
         sent.insert(*vid);
+        records += 1;
+    }
+    for b in extra {
+        put(0, b, &mut payload);
         records += 1;
     }
     let z = miniz_oxide::deflate::compress_to_vec(&payload, 6);
@@ -994,7 +1068,14 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
                 json!({"device": d, "name": n.get("name"), "account": n.get("account"), "online": online.contains_key(&d)})
             }).collect();
             let members: Vec<Value> = p.project.genesis.members.iter().map(|(a, m)| json!({"account": a, "role": m.role, "owner": *a == p.project.genesis.owner})).collect();
-            Ok(json!({"head": p.head().map(|h| h.hex()), "name": p.project.genesis.name, "app": p.binding(), "teammates": teammates, "online": online, "members": members}))
+            let mut out = json!({"head": p.head().map(|h| h.hex()), "name": p.project.genesis.name, "app": p.binding(), "teammates": teammates, "online": online, "members": members});
+            if let (Some(o), Value::Object(extra)) = (out.as_object_mut(), approve::status_fields(node, &p)) {
+                o.extend(extra);
+            }
+            if !approve::on(&p) {
+                out["clashes"] = json!(approve::clashes(&p).unwrap_or_default());
+            }
+            Ok(out)
         }
         "get" => {
             let p = node.project(s("project")?)?;
@@ -1016,10 +1097,12 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
                 let lanes: Vec<String> = serde_json::from_value(m.get("lanes").cloned().unwrap_or(json!([])))?;
                 members.insert(acct.to_string(), project::Member { role, lanes });
             }
-            let p = node.create_project(s("name")?, binding, members)?;
+            // new projects default to "I approve changes"; "live" is today's shared line
+            let mode = req.get("mode").and_then(|m| m.as_str()).unwrap_or("approve");
+            let p = node.create_project_mode(s("name")?, binding, members, Some(mode))?;
             let snap = p.with_app(&node.device, |a| a.snapshot())?;
             let photos: BTreeSet<&str> = snap.keys().map(|k| k.rsplit_once('#').map(|(b, _)| b).unwrap_or(k)).collect();
-            Ok(json!({"project": p.project.id.hex(), "head": p.head().map(|h| h.hex()), "items": snap.len(), "photos": photos.len()}))
+            Ok(json!({"project": p.project.id.hex(), "head": p.head().map(|h| h.hex()), "items": snap.len(), "photos": photos.len(), "mode": if approve::on(&p) { "approve" } else { "live" }}))
         }
         "attach" => {
             let p = node.project(s("project")?)?;
@@ -1044,6 +1127,59 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
         "fetch-original" => {
             let p = node.project(s("project")?)?;
             media::fetch_original(node, &p, s("key")?)
+        }
+        "pending" | "review" => {
+            let p = node.project(s("project")?)?;
+            if !approve::on(&p) {
+                bail!("this project works live: there is nothing to approve");
+            }
+            approve::review(node, &p)
+        }
+        "approve" => {
+            let p = node.project(s("project")?)?;
+            if !approve::on(&p) {
+                bail!("this project works live: there is nothing to approve");
+            }
+            let choices = req.get("choices").and_then(|c| c.as_object()).cloned().unwrap_or_default();
+            approve::approve(node, &p, s("member")?, req.get("version").and_then(|v| v.as_str()), req.get("prefer").and_then(|v| v.as_str()), &choices).await
+        }
+        "decline" => {
+            let p = node.project(s("project")?)?;
+            if !approve::on(&p) {
+                bail!("this project works live: there is nothing to decline");
+            }
+            approve::decline(node, &p, s("member")?, req.get("version").and_then(|v| v.as_str())).await
+        }
+        "view" => {
+            let p = node.project(s("project")?)?;
+            if !approve::on(&p) {
+                bail!("this project works live: there is nothing to review");
+            }
+            let side = req.get("show").and_then(|v| v.as_str()).unwrap_or("member");
+            if !["member", "main", "off"].contains(&side) {
+                bail!("show is member, main or off");
+            }
+            let who = if side == "off" { "" } else { s("member")? };
+            approve::view(node, &p, who, req.get("version").and_then(|v| v.as_str()), side).await
+        }
+        "set-approver" => {
+            let p = node.project(s("project")?)?;
+            if !approve::on(&p) {
+                bail!("this project works live: everyone's edits go to everyone");
+            }
+            approve::set_approver(node, &p, s("account")?, req.get("approver").and_then(|v| v.as_bool()).unwrap_or(true)).await
+        }
+        "clashes" => {
+            let p = node.project(s("project")?)?;
+            Ok(json!(approve::clashes(&p)?))
+        }
+        "resolve" => {
+            let p = node.project(s("project")?)?;
+            let pick = s("pick")?;
+            if pick != "a" && pick != "b" {
+                bail!("pick is a or b");
+            }
+            approve::resolve(node, &p, s("clash")?, pick).await
         }
         "add-teammate" => {
             let p = node.project(s("project")?)?;

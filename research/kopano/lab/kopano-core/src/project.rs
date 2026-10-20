@@ -41,6 +41,11 @@ pub struct Genesis {
     pub providers: Vec<String>,
     pub owner: String,
     pub members: BTreeMap<String, Member>,
+    /// How the project works, signed by the owner: absent = "live" (one shared line, every
+    /// edit goes to everyone), "approve" = the owner's main moves only when an approver accepts
+    /// a member's branch (workflow.rs). Absent is not written, so older projects keep their id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -56,9 +61,20 @@ pub struct Project {
 
 impl Project {
     pub fn create(store: &dyn ObjectStore, name: &str, providers: Vec<String>, owner_cert: &DeviceCert, owner_key: &DeviceKey, members: BTreeMap<String, Member>) -> Result<Self> {
+        Self::create_with_mode(store, name, providers, owner_cert, owner_key, members, None)
+    }
+
+    /// `create` with the project's mode written into the signed genesis (`None` = live).
+    pub fn create_with_mode(store: &dyn ObjectStore, name: &str, providers: Vec<String>, owner_cert: &DeviceCert, owner_key: &DeviceKey, members: BTreeMap<String, Member>, mode: Option<&str>) -> Result<Self> {
+        if let Some(m) = mode {
+            if m != "live" && m != "approve" {
+                bail!("unknown project mode {m} (live or approve)");
+            }
+        }
         let mut members = members;
         members.insert(owner_cert.body.account.clone(), Member { role: Role::Admin, lanes: vec![] });
-        let g = Genesis { kind: "kopano.project".into(), name: name.into(), created_ms: now_ms(), providers, owner: owner_cert.body.account.clone(), members };
+        let mode = mode.filter(|m| *m != "live").map(str::to_string);
+        let g = Genesis { kind: "kopano.project".into(), name: name.into(), created_ms: now_ms(), providers, owner: owner_cert.body.account.clone(), members, mode };
         let sg = SignedGenesis { genesis: Signed::new(g, owner_key.signing())?, cert: owner_cert.clone() };
         let id = store.put(&serde_json::to_vec(&sg)?)?;
         store.flush()?;
@@ -75,6 +91,11 @@ impl Project {
             bail!("project genesis is not signed by its owner's device");
         }
         Ok(Self { id: *id, genesis: g })
+    }
+
+    /// Main moves only by approval (workflow.rs): the genesis says "approve".
+    pub fn approve_mode(&self) -> bool {
+        self.genesis.mode.as_deref() == Some("approve")
     }
 
     pub fn may_write(&self, account: &str, lane: &str) -> bool {

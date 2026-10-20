@@ -274,7 +274,7 @@ pub fn member_device(p: &Proj, device: &str) -> bool {
     let Some(n) = names.get(device) else { return false };
     let acct = n.get("account").and_then(Value::as_str).unwrap_or("");
     let fresh = n.get("expires_ms").and_then(Value::as_u64).map_or(true, |e| e > now_ms());
-    p.peers().contains(device) && fresh && p.project.genesis.members.contains_key(acct)
+    p.peers().contains(device) && fresh && p.is_member_account(acct)
 }
 
 /// Every media hash this project lets its members fetch: the originals its items reference and
@@ -732,6 +732,7 @@ async fn bring_in(node: &Arc<Node>, p: &Arc<Proj>, files: &[(String, Local)], or
         let v = repo.save(&mut View::new(&p.store, p.head(), c), "Edit in Light")?;
         if v.is_some() {
             p.set_head(repo.head)?;
+            crate::approve::sign_mine(node, p)?;
         }
         Ok(v)
     })?;

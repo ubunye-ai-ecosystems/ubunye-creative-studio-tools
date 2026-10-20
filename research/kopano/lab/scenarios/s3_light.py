@@ -13,6 +13,7 @@ PHOTOS = sys.argv[sys.argv.index('--photos') + 1] if '--photos' in sys.argv else
 LB = int(sys.argv[sys.argv.index('--light-base') + 1]) if '--light-base' in sys.argv else 18000
 KB = int(sys.argv[sys.argv.index('--port-base') + 1]) if '--port-base' in sys.argv else 47110
 LP, KP = {'a': LB + 1, 'b': LB + 2}, {'a': KB + 1, 'b': KB + 2}
+MODE = sys.argv[sys.argv.index('--mode') + 1] if '--mode' in sys.argv else 'live'
 res = {}
 
 
@@ -101,7 +102,8 @@ try:
     adev = json.load(open(f'{W}/a/cert.json'))['body']['device']
 
     t0 = time.time()
-    made = kcall('a', op='create-project', name='Light shoot (S3)', app={'kind': 'light-control', 'port': LP['a']},
+    # S3 is the live mode; new projects default to approve, so say it
+    made = kcall('a', op='create-project', name='Light shoot (S3)', mode=MODE, app={'kind': 'light-control', 'port': LP['a']},
                  members=[{'account': m1['account'], 'role': 'editor', 'lanes': []}])
     pid = made['project']
     res['create'] = {'items': made['items'], 'ms': round((time.time() - t0) * 1000)}
