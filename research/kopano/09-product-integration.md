@@ -203,8 +203,11 @@ binding can merge beside it); test: `lab/scenarios/s6_photo.py`.
    old tile, but saves see the project's tile, so nothing is sent back to the team. If the user
    repaints that tile meanwhile, the user's stroke wins.
 4. One update per call. After every call the window gets one `kopano.import` (one undo step in
-   Photo). If Photo refuses it because the user edited meanwhile, nothing half-applied is sent,
-   and kopanod saves the user's edit and brings the team's change in again (up to 8 tries).
+   Photo), built on the snapshot the call saved first. If Photo refuses it because the user
+   edited after that snapshot, nothing half-applied is sent, what the call did to waiting tiles
+   is undone, and kopanod saves the user's edit and brings the team's change in again (up to 8
+   tries; a try that still fails waits for the next push). See "The refused-update data loss"
+   below.
 5. A window that (re)connects is brought to the project first (the S3b data-loss class). Its own
    state is kept as a version off the main line (`kept.json`), the project's items are applied
    and items the project does not have are taken out. A window that joins a project with no
@@ -312,8 +315,63 @@ snapshot one stroke old while the user paints. Its update is then refused by Pho
 step 5, 10 or 11 of Member1's tiles were replaced by older versions in both windows (same head,
 0 clashes) in 6 of 25 runs, with the old kopanod (1 of 9) and the new one alike. With the
 unchanged Photo the refused path is rare (0 refused updates in 10 runs here) and nothing was
-lost. **Open: the refused-update path in `Node::integrate` can lose a user's newest tiles**;
-sim_fuzz does not model an app that refuses updates. Until it is found, keep refusals rare.
+lost. That loss is found and fixed (next section).
+
+### The refused-update data loss (found and fixed 2026-10-20)
+
+**Cause.** `Repo::integrate` (kopano-core) first saved the app's snapshot, then `apply_tree`
+read the app a SECOND time and applied the merged tree over that second read. A stroke made
+between the two reads was in the second read but not in the merge, so its tiles were put back
+to their older versions. Photo accepted that update, because it was built on Photo's newest
+revision. Nothing was ever saved with the stroke in it: same head on both sides, 0 clashes,
+the stroke gone in both windows. A Photo that reads one stroke old (the previous-export build)
+widens the gap between the two reads, which is why it lost more often. Refusals were the
+symptom, not the cause: the update that should have been refused was the one accepted. The
+same code path serves Light and Film (Light has no revision check, so a slider moved between
+the two reads was put back too).
+
+**Fix.** `Repo::save_seen` hands back the snapshot it saved, and integrate and restore apply
+the target onto exactly that snapshot. Photo now refuses any update built on an older snapshot
+than its document, and `Node::integrate` saves the edit and tries again. Two smaller holes of
+the same class were closed with it:
+
+- Photo binding: after a refused call, `Live::rewind` puts back the waiting tiles and the
+  joining-window flag as they were before the call. Before, a tile applied from "waiting" was
+  then neither waiting nor in the window (the next save would read the old tile as the user's),
+  and a joining window whose first update was refused would speak first with its own document.
+- Film binding: a deferred update (Film refused it, or the footage is on its way) now records
+  what the window held. If the user edits that item, the user's edit wins and is saved. Before,
+  the deferred update hid it from every save and the next retry undid it.
+
+**Test that fails on the old code.** `sim_fuzz::sim_refused_updates_lose_nothing`: two windows
+that behave like Photo (lazy model, one update per call, refused when the document moved since
+the snapshot), Member1 painting and Alice moving a slider between any two calls, kopanod's
+retry loop. Old code: 144 of 200 seeds lost a user's last edit (296 keys). Fixed: 0 of 500
+seeds (11 850 refused updates). Unit tests: `a_refused_call_leaves_pending_tiles_and_a_joining_window_as_they_were`,
+`a_user_edit_on_a_waiting_update_wins`.
+
+**Real test (S6, this PC, owner's DSC08379 document; runs in T:/kopano-lab/refused)**
+
+| | refusal-provoking Photo (50570b72) | normal Photo (d2a3ad2f) |
+|---|---|---|
+| Old kopanod, earlier runs | tiles lost in 6 of 25 runs (10 or 11 each) | lost in 1 of 9 |
+| Old kopanod, 10 runs today | 0 lost, 7 refused updates per run (10 of 10) | |
+| Fixed kopanod | 25 runs: 0 tiles lost, 8 refused updates per run, settled 2.1 to 2.8 s | 10 runs: 0 lost, 0 refused, settled 1.0 to 1.3 s |
+| Fixed kopanod, whole run | same head, windows match, 0 clashes, reopen keeps the team's edits | same |
+
+The fixed kopanod sees exactly one more refusal per run than the old one, in every run: that is
+the update the old code accepted on its second read. The S6 count of lost tiles also
+undercounts: a reverted tile that a later stroke paints over looks right in both windows,
+although the stroke under it is gone. One fixed run (of 26) failed before step 5 at the join
+("that teammate is not reachable", the address lookup) and was run again.
+
+Also after the fix: kopano-node 23 of 23, kopano-core 10 of 10 plus 3, kopano-lab tests all
+pass (sim_fuzz 500 seeds: 0 diverged, 0 stuck, 0 lost), S1 20 of 20 edits (median 125 ms),
+concurrent edits settle, restart catch-up.
+
+**Limit.** While a user paints without a pause, a team change waits for a gap: in S6 one
+integrate was refused 8 times and landed on the 9th try, 5.4 s after it arrived. Nothing is
+lost meanwhile, and a try that still fails waits for the next push.
 
 ## 8. Slice "Film": one film cut from two computers
 
