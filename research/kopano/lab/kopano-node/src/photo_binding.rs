@@ -45,6 +45,8 @@ impl Binding {
     pub fn edit_message(&self) -> &'static str {
         if self.is_photo() {
             "Edit in Photo"
+        } else if crate::film_binding::is_film(self) {
+            "Edit in Film"
         } else {
             "Edit in Light"
         }

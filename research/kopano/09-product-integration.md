@@ -228,3 +228,72 @@ conditions).
 - Layers made in a window before any update from the team get random uids that the window does
   not store (only an update writes the uid map into the document); a reconnect then sees them as
   new layers, keeps the old ones in `kept.json` and brings the project's back.
+
+## 8. Slice "Film": one film cut from two computers
+
+The Film connector (E40, `lab/kopano-lab/src/film.rs`) now runs inside kopanod. Code:
+`lab/kopano-node/src/film_binding.rs` (lib.rs only gains the binding and three hooks); test:
+`lab/scenarios/s6_film.py`.
+
+**How it works**
+
+1. Binding `{"kind": "film-control", "port": P}` (the running Film, `filmcraft --control P`) or
+   `{"kind": "film-headless", "cli", "project"}` for tests; `create-project`, `join` and `attach`
+   take it like Light's.
+2. Id blocks. kopanod gives each window it links an id block derived from the device, the
+   project and a counter (`kopano.idBlock {block}`); Film refuses a block any id of the project
+   already uses and kopanod takes the next. Two people never make the same clip id.
+3. A window never speaks first. A window kopanod (re)connects to, or one that opened another
+   file, gets its block first, then is brought to the head: its own state is kept off the main
+   line (`kept.json`), the head is applied and clips the head does not have are taken out.
+   Every snapshot is checked against the window's block (read in the same call as the items),
+   so a file opened meanwhile is never saved as an edit. A window with nothing of this project
+   open (Film just started, or another project) is left alone and shows the project's state.
+4. Footage not here is not a change. A clip whose original has no media item in the window is
+   the project's clip; an update Film refuses waits (`deferred`) and is tried again every few
+   seconds and when footage arrives.
+5. Footage through media.rs, membership-checked. A teammate's missing media item is recognised
+   by name and size (asked from the owner's device), then gets a proxy: Film's own
+   `media.createProxies` (H.264, quarter size) in a headless Film engine on the device with the
+   original (made ahead for shared projects), attached with `media.attachProxies`. Originals on
+   request (`fetch-original {key}`: a media hash, a clip key or `all`); the media item is then
+   relinked, so exports are made from originals.
+6. Flush: after team changes land, kopanod saves Film's project file (`file.save`, only when the
+   window has one).
+
+**Real test (2026-10-20, this PC, two Film windows, two kopanod with their own KOPANO_HOME and
+KOPANO_API_PORT, the owner's 3 Sony XAVC clips; screenshots in T:/kopano-lab/film-kopanod)**
+
+| Step | Result |
+|---|---|
+| Member1's project file points at footage that is not on his side | 3 of 3 clips play from proxies 11.5 s after joining: 1.34 MB for 71.3 MB of originals (1.9 %); proxies made on Alice's side in 0.9 to 3.3 s each |
+| Id blocks | 103940031 and 484757726; a razor cut on each side at the same moment: 4 new clips, 2 from each block, all unique, both sides 10 clips in 3.7 s |
+| Alice trims 15 frames and grades (Lumetri exposure, temperature, saturation, contrast) while Member1 sets -9 dB | in Member1's window 0.1 s after the edit commands returned, the level in Alice's 0.05 s; 0 clashes |
+| Member1 asks for the 3 originals | 4.4 s, media items relinked |
+| Same frame, same export | frame PNG identical; 2 s software H.264 export identical (6.48 MB) |
+| Member1's Film closed; a fresh window runs empty 8 s, then opens the OLD file | team work untouched while empty; brought to the project in 0.2 s; old state kept as a version; Alice keeps grade, level and 10 clips; head unchanged |
+| Alice starts an unrelated new project in her window | left alone; Member1 keeps everything |
+| Alice reopens the old file | brought back in 3.6 s; kept as a version |
+| 20 s quiet | both heads equal and still |
+| Regressions | kopanod unit tests 14/14; S1 20/20 edits (median 560 ms, debug build on a busy PC), both ways, clashes settle, restart catch-up; S3 Light exposure 1.6 s, stars 1.5 s, slider drag 0.9 s, same head |
+
+**Found and fixed on the way (each was data loss or a loop on the real app)**
+
+- A fresh window that opened the old file between being brought to the project and getting its
+  id block was saved as an edit and pushed (the team lost trim, grade and level). Fixed by the
+  block-first order and the per-snapshot block check.
+- An empty window read as "every clip removed" (a whole timeline lost). Fixed: no opinion shows
+  the project's state.
+- `integrate` ("same content, settled") picked the smaller id even when that version was older:
+  two forks whose trees cross-matched cycled for ever and the window flipped between two states
+  every second. Settling now moves only forward (versions behind it, then the smaller id).
+
+**Open**
+
+- New sequences and project items do not travel yet (E40): both sides need the project file.
+- A clip arriving from a teammate is not checked for overlap; a user edit made while a merge is
+  half applied can be refused by Film for an overlap (seen once in testing; nothing lost).
+- When a window lacks the media item entirely, the proxy is imported as the item and relinked to
+  the original later; Film may keep the proxy's frame size in the item info (not tested).
+- Film shows "Media missing" with a P badge on proxy clips and asks to link footage when the
+  file opens; the panel should say the footage is on its way.

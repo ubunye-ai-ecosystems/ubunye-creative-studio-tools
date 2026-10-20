@@ -66,20 +66,20 @@ pub struct Local {
 
 pub struct Media {
     pub store: FsStore,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     /// previews this device made from its own originals: original BLAKE3 -> offer
-    made: std::sync::Mutex<BTreeMap<String, Offer>>,
+    pub(crate) made: std::sync::Mutex<BTreeMap<String, Offer>>,
     /// one render at a time: a 24 MP raw takes ~3 s and a few hundred MB
-    render: tokio::sync::Mutex<()>,
+    pub(crate) render: tokio::sync::Mutex<()>,
     /// blobs connection id -> device, for the per-request check
     conns: std::sync::Mutex<HashMap<u64, [u8; 32]>>,
     /// per project: (head, every media hash the project lets members fetch)
-    refs: std::sync::Mutex<HashMap<Id, (Option<Id>, HashSet<String>)>>,
+    pub(crate) refs: std::sync::Mutex<HashMap<Id, (Option<Id>, HashSet<String>)>>,
     /// originals on their way, for the `media` op: key -> progress
     pub jobs: std::sync::Mutex<BTreeMap<String, Value>>,
     /// making previews ahead failed once (e.g. no Light engine here): stop trying in the
     /// background; a teammate's request still tries and gets the reason
-    ahead_off: std::sync::atomic::AtomicBool,
+    pub(crate) ahead_off: std::sync::atomic::AtomicBool,
 }
 
 impl Media {
@@ -93,13 +93,13 @@ impl Media {
     pub fn preview_dir(&self) -> PathBuf {
         self.dir.join("previews")
     }
-    async fn complete(&self, hash: &str) -> bool {
+    pub(crate) async fn complete(&self, hash: &str) -> bool {
         match hash.parse::<iroh_blobs::Hash>() {
             Ok(h) => self.store.remote().local(h).await.map(|l| l.is_complete()).unwrap_or(false),
             Err(_) => false,
         }
     }
-    fn remember_made(&self, original: &str, o: Offer) -> Result<()> {
+    pub(crate) fn remember_made(&self, original: &str, o: Offer) -> Result<()> {
         let mut m = self.made.lock().unwrap_or_else(|e| e.into_inner());
         m.insert(original.into(), o);
         kopano_core::store::write_atomic(&self.dir.join("previews.json"), &serde_json::to_vec(&*m)?)
@@ -128,12 +128,13 @@ fn base(k: &str) -> &str {
     k.rsplit_once('#').map(|(b, _)| b).unwrap_or(k)
 }
 
-/// The photos of the project's head (base key -> its original), from the develop items.
-fn originals_in(store: &RedbStore, head: Option<Id>) -> Result<BTreeMap<String, AssetRef>> {
+/// The media of the project's head (base key -> its original): Light's develop items, Film's
+/// clip edit parts (film_binding.rs); any item that names an original.
+pub(crate) fn originals_in(store: &RedbStore, head: Option<Id>) -> Result<BTreeMap<String, AssetRef>> {
     let mut out = BTreeMap::new();
     let Some(h) = head else { return Ok(out) };
     for (k, id) in tree::entries(store, project::load_version(store, &h)?.tree()?)? {
-        if !k.ends_with("#develop") {
+        if !(k.ends_with("#develop") || k.ends_with("#edit")) {
             continue;
         }
         if let Some(a) = Item::get(store, &id)?.assets.into_iter().find(|a| a.role == "original") {
@@ -340,6 +341,9 @@ pub async fn offer(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Value {
 }
 
 async fn offer_inner(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Result<Offer> {
+    if crate::film_binding::is_film(&p.binding()) {
+        return crate::film_binding::offer(node, p, req).await;
+    }
     let m = node.media.get().context("media not started")?;
     let hash = req.get("hash").and_then(Value::as_str).context("hash")?.to_string();
     let originals = originals_in(&p.store, p.head())?;
@@ -408,7 +412,7 @@ async fn offer_inner(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Result<Off
 // ---- asking: one request to a teammate, then the blob ------------------------------------------
 
 /// One request on the sync protocol (same handshake as watch and join).
-async fn ask(node: &Node, p: &Proj, device: &str, req: &Value) -> Result<Value> {
+pub(crate) async fn ask(node: &Node, p: &Proj, device: &str, req: &Value) -> Result<Value> {
     let ep = node.endpoint.get().context("not started")?.clone();
     let id = iroh::EndpointId::from_bytes(&hex::decode(device)?.try_into().map_err(|_| anyhow!("bad device id"))?)?;
     let conn = tokio::time::timeout(Duration::from_secs(30), ep.connect(EndpointAddr::from(id), ALPN)).await.map_err(|_| anyhow!("not reachable"))??;
@@ -445,7 +449,7 @@ pub fn reserve(dir: &Path, bytes: u64) -> Result<()> {
 /// Fetch one blob from one teammate (E28 + E39 from the lab's `fetch-media`): what is already
 /// here is not fetched again (a cut download continues), the size is proven first and must fit
 /// on the disk, and `progress(done, total)` is called as bytes arrive. Returns bytes received.
-async fn fetch(node: &Node, device: &str, hash: &str, mut progress: impl FnMut(u64, u64)) -> Result<u64> {
+pub(crate) async fn fetch(node: &Node, device: &str, hash: &str, mut progress: impl FnMut(u64, u64)) -> Result<u64> {
     use futures_lite::StreamExt;
     let m = node.media.get().context("media not started")?;
     let h: iroh_blobs::Hash = hash.parse()?;
@@ -497,7 +501,7 @@ pub(crate) fn sources(p: &Proj) -> Vec<String> {
     v
 }
 
-fn file_name_for(dir: &Path, name: &str, ext: Option<&str>, hash: &str) -> PathBuf {
+pub(crate) fn file_name_for(dir: &Path, name: &str, ext: Option<&str>, hash: &str) -> PathBuf {
     let stem = Path::new(name).file_stem().map(|s| s.to_string_lossy().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| hash[..12].to_string());
     let file = match ext {
         Some(e) => format!("{stem}.{e}"),
@@ -517,6 +521,9 @@ fn file_name_for(dir: &Path, name: &str, ext: Option<&str>, hash: &str) -> PathB
 pub fn spawn(node: Arc<Node>, p: Arc<Proj>) {
     if p.binding() == Binding::Toy {
         return;
+    }
+    if crate::film_binding::is_film(&p.binding()) {
+        return crate::film_binding::spawn(node, p);
     }
     tokio::spawn(async move {
         let mut heads = p.heads.subscribe();
@@ -699,6 +706,9 @@ async fn bring_in(node: &Arc<Node>, p: &Arc<Proj>, files: &[(String, Local)], or
 
 /// Start fetching one photo's original; progress arrives as `original` events.
 pub fn fetch_original(node: &Arc<Node>, p: &Arc<Proj>, key: &str) -> Result<Value> {
+    if crate::film_binding::is_film(&p.binding()) {
+        return crate::film_binding::fetch_original(node, p, key);
+    }
     let key = base(key).to_string();
     let a = originals_in(&p.store, p.head())?.remove(&key).context("no such photo in the project")?;
     if p.with_light(&node.device, |c| {
@@ -785,6 +795,9 @@ async fn get_original(node: &Arc<Node>, p: &Arc<Proj>, key: &str, a: &AssetRef) 
 
 /// The `media` op: where each photo of the project stands on this device.
 pub fn status(node: &Arc<Node>, p: &Arc<Proj>) -> Result<Value> {
+    if crate::film_binding::is_film(&p.binding()) {
+        return crate::film_binding::status(node, p);
+    }
     let originals = originals_in(&p.store, p.head())?;
     let (mut from_original, mut from_preview, mut waiting) = (0, 0, Vec::new());
     if p.binding() != Binding::Toy && !p.binding().is_photo() {

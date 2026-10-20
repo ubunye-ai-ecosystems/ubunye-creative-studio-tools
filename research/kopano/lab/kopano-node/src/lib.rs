@@ -17,6 +17,7 @@
 
 #[path = "../../kopano-lab/src/keystore.rs"]
 pub mod keystore;
+pub mod film_binding;
 pub mod media;
 pub mod photo_binding;
 pub mod unlinked;
@@ -77,6 +78,8 @@ pub struct Proj {
     online: std::sync::Mutex<BTreeMap<String, String>>,
     binding: std::sync::Mutex<Binding>,
     light: std::sync::Mutex<Option<LightConnector>>,
+    /// the Film window, when this project lives in Film (film_binding.rs)
+    film: std::sync::Mutex<Option<film_binding::Slot>>,
     /// the node's media (set when the node starts): where preview files live
     media: std::sync::OnceLock<Arc<media::Media>>,
     /// a Photo window bound to this project (photo_binding.rs)
@@ -107,6 +110,10 @@ pub enum Binding {
         #[serde(default)]
         media_dir: Option<String>,
     },
+    /// the running Film desktop app (`filmcraft --control PORT`), see film_binding.rs
+    FilmControl { port: u16 },
+    /// a headless Film engine (`filmcraft-cli mcp`) on a project file, or Film's demo (tests)
+    FilmHeadless { cli: String, project: Option<String> },
 }
 
 impl Proj {
@@ -125,6 +132,7 @@ impl Proj {
             online: Default::default(),
             binding: std::sync::Mutex::new(std::fs::read(dir.join("binding.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Binding::Toy)),
             light: Default::default(),
+            film: Default::default(),
             media: Default::default(),
             photo: Default::default(),
         })
@@ -140,6 +148,7 @@ impl Proj {
                 Ok(r)
             }),
             b if b.is_photo() => photo_binding::with_photo(self, dev, f),
+            Binding::FilmControl { .. } | Binding::FilmHeadless { .. } => film_binding::with_app(self, dev, f),
             // media.rs: photos whose preview is still on its way count as the project's state
             _ => self.with_light(dev, |c| f(&mut media::View::new(&self.store, self.head(), c))),
         }
@@ -215,6 +224,7 @@ impl Proj {
         *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = b;
         *self.light.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.photo.reset();
+        *self.film.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
     /// How many photos (items before the `#lane`) differ between two versions.
@@ -470,7 +480,13 @@ impl Node {
             if m != theirs && !project::is_ancestor(&p.store, &theirs, &m)? && !project::is_ancestor(&p.store, &m, &theirs)? {
                 let (tm, tt) = (project::load_version(&p.store, &m)?.tree()?, project::load_version(&p.store, &theirs)?.tree()?);
                 if tm == tt {
-                    if theirs < m {
+                    // Rank = (versions behind it, then the smaller id): a fast-forward always
+                    // raises it, so settling must too. Settling on the smaller id alone let two
+                    // forks whose trees cross-match (S6, after two windows were linked again)
+                    // cycle: settle back to an older version, fast-forward, settle, for ever,
+                    // with the window flipping between two states every second.
+                    let rank = |v: &Id| project::history(&p.store, &[*v]).map(|h| (h.len(), std::cmp::Reverse(*v)));
+                    if rank(&theirs)? > rank(&m)? {
                         p.set_head(Some(theirs))?;
                         return Ok(Some(("same content, settled", 0)));
                     }

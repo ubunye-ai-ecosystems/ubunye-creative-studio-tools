@@ -2,6 +2,7 @@
 //! (Light, Photo, Film) so the core can be tested without any of them, which is the point: the
 //! core must not care which app is on the other side.
 
+pub mod film;
 pub mod light;
 pub mod photo;
 
@@ -224,5 +225,54 @@ mod photo_tiles {
         assert!(s2[&adj].assets.is_empty());
         drop(a);
         let _ = std::fs::remove_dir_all(&media);
+    }
+}
+
+#[cfg(test)]
+mod film_tests {
+    fn conformance_report<H: kopano_core::conformance::Harness>(h: &H) -> Vec<&'static str> {
+        let mut failed = Vec::new();
+        for o in kopano_core::conformance::run(h) {
+            match &o.result {
+                Ok(()) => println!("PASS  {}", o.name),
+                Err(e) => {
+                    println!("FAIL  {}: {e:#}", o.name);
+                    failed.push(o.name);
+                }
+            }
+        }
+        failed
+    }
+
+    /// The kit against the real Ubunye Film engine (headless `filmcraft-cli mcp`), on Film's
+    /// demo project or on `KOPANO_FILM_PROJECT`. Runs only when KOPANO_FILM_CLI points at
+    /// filmcraft-cli built from Film's feature/kopano-stable-ids branch.
+    #[test]
+    fn ubunye_film_passes_conformance() {
+        let Ok(cli) = std::env::var("KOPANO_FILM_CLI") else {
+            println!("skipped: set KOPANO_FILM_CLI");
+            return;
+        };
+        let project = std::env::var("KOPANO_FILM_PROJECT").ok();
+        let h = crate::film::FilmConnector::headless(&cli, project.as_deref()).unwrap();
+        let failed = conformance_report(&h);
+        assert!(failed.is_empty(), "failed: {failed:?}");
+    }
+
+    /// The same kit against two running Film windows (`filmcraft --control PORT`), each fresh
+    /// instance reopening KOPANO_FILM_PROJECT. Runs only when KOPANO_FILM_PORTS is set
+    /// ("18401,18402").
+    #[test]
+    fn ubunye_film_windows_pass_conformance() {
+        let (Ok(ports), Ok(project)) = (std::env::var("KOPANO_FILM_PORTS"), std::env::var("KOPANO_FILM_PROJECT")) else {
+            println!("skipped: set KOPANO_FILM_PORTS and KOPANO_FILM_PROJECT");
+            return;
+        };
+        let ports: Vec<u16> = ports.split(',').map(|p| p.trim().parse().unwrap()).collect();
+        let fresh = crate::film::Fresh::Windows { ports: ports.clone(), project: project.clone() };
+        let mut h = crate::film::FilmConnector::live(ports[0], fresh).unwrap();
+        h.open(&project).unwrap();
+        let failed = conformance_report(&h);
+        assert!(failed.is_empty(), "failed: {failed:?}");
     }
 }
