@@ -23,6 +23,17 @@
 //!    `Node::integrate` saves the user's edit and tries again.
 //! 5. Every tile and blob the window's items name is put in the node's media store before the
 //!    version naming it is pushed, so a teammate can fetch it at once.
+//! 6. Tiles travel packed. A tile item names its raw pixels (256 KB for 256x256 RGBA); beside
+//!    each raw object the store also holds its zstd form under that form's own BLAKE3 (Photo's
+//!    own bundle bytes, kept by the connector, so packing costs nothing). Before fetching, the
+//!    receiver asks the teammate which packed form stands for which raw hash (`tiles-packed`, on
+//!    the member-checked sync channel), fetches the packed blob (iroh-blobs checks the packed
+//!    hash on the way in), unpacks it and checks the RAW hash the signed version names before
+//!    the tile is used. A wrong answer can only cost one wasted fetch: the tile is then fetched
+//!    raw. A teammate whose kopanod predates this refuses the question, and everything is
+//!    fetched raw, as before; an older receiver never asks. The gate serves a packed blob only
+//!    to a device that may fetch its raw object. Items are unchanged, so merges and old peers
+//!    see the same identity. `KOPANO_PHOTO_RAW_TILES=1` turns packing off (measurements).
 
 use crate::{media, Binding, Device, Node, Proj};
 use anyhow::{anyhow, Context, Result};
@@ -31,8 +42,9 @@ use kopano_core::connector::{Connector, ConnectorInfo};
 use kopano_core::project::{self, Item};
 use kopano_core::store::{Id, ObjectStore};
 use kopano_core::tree;
-use kopano_lab::photo::PhotoConnector;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use kopano_lab::photo::{self as photo, PhotoConnector};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -199,7 +211,19 @@ pub struct Slot {
     published: std::sync::Mutex<HashSet<String>>,
     /// (versions already read, every media hash they name): what members may fetch
     refs: std::sync::Mutex<(HashSet<Id>, HashSet<String>)>,
+    /// raw media hash -> (hash of its zstd form in the store, its size)
+    packed: std::sync::Mutex<HashMap<String, (String, u64)>>,
+    /// zstd form's hash -> the raw hash it stands for (the gate serves it as that raw object)
+    packed_of: std::sync::Mutex<HashMap<String, String>>,
 }
+
+/// Packing turned off on this device (for before/after measurements).
+fn raw_tiles_only() -> bool {
+    std::env::var("KOPANO_PHOTO_RAW_TILES").is_ok_and(|v| v == "1")
+}
+
+/// Largest object a packed blob may unpack to (Photo's own limit for one object).
+const MAX_OBJECT: u64 = 1 << 30;
 
 impl Slot {
     /// Drop the connection (the project was pointed at another window).
@@ -365,20 +389,39 @@ fn publish(p: &Proj, app: &PhotoConnector) {
         return;
     }
     let rt = tokio::runtime::Handle::current();
+    let pack = !raw_tiles_only();
     for h in todo {
         let path = app.media_dir().join(&h);
-        let r: Result<()> = rt.block_on(async {
+        let zpath = photo::packed_path(app.media_dir(), &h);
+        let r: Result<Option<(String, u64)>> = rt.block_on(async {
             let hash: iroh_blobs::Hash = h.parse()?;
-            if m.store.remote().local(hash).await?.is_complete() {
-                return Ok(());
+            if !m.store.remote().local(hash).await?.is_complete() {
+                let opts = iroh_blobs::api::blobs::AddPathOptions { path: std::path::absolute(&path)?, format: iroh_blobs::BlobFormat::Raw, mode: iroh_blobs::api::blobs::ImportMode::TryReference };
+                let tag = m.store.blobs().add_path_with_opts(opts).await?;
+                anyhow::ensure!(tag.hash == hash, "media file {h} does not match its name");
             }
-            let opts = iroh_blobs::api::blobs::AddPathOptions { path: std::path::absolute(&path)?, format: iroh_blobs::BlobFormat::Raw, mode: iroh_blobs::api::blobs::ImportMode::TryReference };
+            if !pack {
+                return Ok(None);
+            }
+            if !zpath.is_file() {
+                // normally kept by the connector already (Photo's own bytes); else made once here
+                let raw = std::fs::read(&path)?;
+                photo::keep_packed(app.media_dir(), &h, &photo::pack(&raw), raw.len())?;
+                if !zpath.is_file() {
+                    return Ok(None); // does not get smaller: it travels raw
+                }
+            }
+            let size = std::fs::metadata(&zpath)?.len();
+            let opts = iroh_blobs::api::blobs::AddPathOptions { path: std::path::absolute(&zpath)?, format: iroh_blobs::BlobFormat::Raw, mode: iroh_blobs::api::blobs::ImportMode::TryReference };
             let tag = m.store.blobs().add_path_with_opts(opts).await?;
-            anyhow::ensure!(tag.hash == hash, "media file {h} does not match its name");
-            Ok(())
+            Ok(Some((tag.hash.to_hex().to_string(), size)))
         });
         match r {
-            Ok(()) => {
+            Ok(z) => {
+                if let Some((zh, size)) = z {
+                    p.photo.packed_of.lock().unwrap_or_else(|e| e.into_inner()).insert(zh.clone(), h.clone());
+                    p.photo.packed.lock().unwrap_or_else(|e| e.into_inner()).insert(h.clone(), (zh, size));
+                }
                 done.insert(h);
             }
             Err(e) => eprintln!("[kopanod] media: tile {} not offered: {e:#}", &h[..8]),
@@ -386,7 +429,96 @@ fn publish(p: &Proj, app: &PhotoConnector) {
     }
 }
 
+/// Answer a member's `{"op": "tiles-packed", "hashes": [raw...]}`: the packed form of each raw
+/// object this device holds packed and the asker may fetch. Hashes it cannot answer are left out
+/// (the asker fetches those raw).
+pub fn packed_offer(p: &Proj, req: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    if !raw_tiles_only() {
+        let asked: Vec<String> = req.get("hashes").and_then(Value::as_array).into_iter().flatten().take(1 << 16).filter_map(|h| h.as_str().map(String::from)).collect();
+        let packed = p.photo.packed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for h in asked {
+            if let Some((z, size)) = packed.get(&h) {
+                if serves_raw(p, &h) {
+                    out.insert(h, json!({"hash": z, "size": size}));
+                }
+            }
+        }
+    }
+    json!({"packed": out})
+}
+
 const FETCH_AT_ONCE: usize = 16;
+
+/// The teammate's `tiles-packed` answer: raw hash -> packed hash (well-formed entries only).
+fn packed_answer(v: &Value) -> HashMap<iroh_blobs::Hash, iroh_blobs::Hash> {
+    let mut out = HashMap::new();
+    for (raw, z) in v.get("packed").and_then(Value::as_object).into_iter().flatten() {
+        if let (Some(r), Some(z)) = (hash64(raw), z.get("hash").and_then(Value::as_str).and_then(hash64)) {
+            out.insert(r, z);
+        }
+    }
+    out
+}
+
+/// A BLAKE3 hash from a teammate's text: 64 lowercase hex digits only (iroh's own parser panics
+/// on some malformed lengths, and a teammate's answer must never stop this service).
+fn hash64(s: &str) -> Option<iroh_blobs::Hash> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// What one tile cost to bring in.
+struct Got {
+    /// bytes received for it (payload and verification data)
+    wire: u64,
+    /// its raw size
+    raw: u64,
+    packed: bool,
+}
+
+/// Bring one raw object into `dir`: its packed form when the teammate named one (unpacked here
+/// and checked against the raw hash), else, or if that fails, the raw object itself.
+async fn fetch_one(store: &iroh_blobs::store::mem::MemStore, conn: &iroh::endpoint::Connection, hash: iroh_blobs::Hash, z: Option<iroh_blobs::Hash>, dir: &Path) -> Result<Got> {
+    let h = hash.to_hex().to_string();
+    let write = |raw: &[u8]| -> Result<()> {
+        let part = dir.join(format!("{h}.part"));
+        std::fs::write(&part, raw)?;
+        std::fs::rename(&part, dir.join(&h))?;
+        Ok(())
+    };
+    let mut wire = 0;
+    if let Some(z) = z {
+        let r = async {
+            let st = store.remote().fetch(conn.clone(), z).await.map_err(|e| anyhow!("{e}"))?;
+            // the packed hash is checked on the way in; the raw hash after unpacking
+            let zb = store.blobs().get_bytes(z).await.map_err(|e| anyhow!("{e}"))?;
+            let h2 = h.clone();
+            let (raw, zb) = tokio::task::spawn_blocking(move || photo::unpack(&zb, &h2, MAX_OBJECT).map(|raw| (raw, zb))).await??;
+            anyhow::Ok((st.total_bytes_read(), raw, zb))
+        }
+        .await;
+        match r {
+            Ok((n, raw, zb)) => {
+                // kept packed too, so this device can hand it on packed
+                let _ = photo::keep_packed(dir, &h, &zb, raw.len());
+                write(&raw)?;
+                return Ok(Got { wire: n, raw: raw.len() as u64, packed: true });
+            }
+            Err(e) => {
+                eprintln!("[kopanod] media: packed tile {} not usable, fetching it raw: {e:#}", &h[..8]);
+                wire = 0;
+            }
+        }
+    }
+    let st = store.remote().fetch(conn.clone(), hash).await.map_err(|e| anyhow!("{e}"))?;
+    // verified against its hash on the way in (BLAKE3 = the tile's name)
+    let bytes = store.blobs().get_bytes(hash).await.map_err(|e| anyhow!("{e}"))?;
+    write(&bytes)?;
+    Ok(Got { wire: wire + st.total_bytes_read(), raw: bytes.len() as u64, packed: false })
+}
 
 /// Fetch these tiles from online teammates (owner's devices first) into the store, then into the
 /// connector's media folder. One connection per teammate for all of them. Returns how many are
@@ -413,13 +545,26 @@ fn fetch_tiles(p: &Proj, want: &BTreeSet<String>, dir: &Path) -> Result<usize> {
             }
             let Ok(id) = hex::decode(&dev).map_err(|e| anyhow!("{e}")).and_then(|b| iroh::EndpointId::from_bytes(&b.try_into().map_err(|_| anyhow!("bad device id"))?).map_err(|e| anyhow!("{e}"))) else { continue };
             let tc = Instant::now();
-            let conn = match tokio::time::timeout(Duration::from_secs(5), ep.connect(EndpointAddr::from(id), iroh_blobs::ALPN)).await {
+            // which packed form stands for which tile, asked while the blobs connection opens
+            let ask_packed = async {
+                if raw_tiles_only() {
+                    return HashMap::new();
+                }
+                let req = json!({"op": "tiles-packed", "hashes": left.iter().map(|h| h.to_hex().to_string()).collect::<Vec<_>>()});
+                match tokio::time::timeout(Duration::from_secs(5), media::ask(&node, p, &dev, &req)).await {
+                    Ok(Ok(v)) => packed_answer(&v),
+                    _ => HashMap::new(), // an older kopanod: raw
+                }
+            };
+            let (conn, packed) = tokio::join!(tokio::time::timeout(Duration::from_secs(5), ep.connect(EndpointAddr::from(id), iroh_blobs::ALPN)), ask_packed);
+            let conn = match conn {
                 Ok(Ok(c)) => c,
                 _ => continue,
             };
             let connect_ms = tc.elapsed().as_millis();
             let tf = Instant::now();
             let asked = left.len();
+            let (mut bytes, mut raw_bytes, mut n_packed) = (0u64, 0u64, 0usize);
             // several at once on one connection: one at a time waits on every round trip
             let mut still = Vec::new();
             let mut jobs = tokio::task::JoinSet::new();
@@ -428,29 +573,36 @@ fn fetch_tiles(p: &Proj, want: &BTreeSet<String>, dir: &Path) -> Result<usize> {
                 while jobs.len() < FETCH_AT_ONCE {
                     let Some(hash) = queue.next() else { break };
                     let (store, conn, dir) = (mem.clone(), conn.clone(), dir.to_path_buf());
+                    let z = packed.get(&hash).copied();
                     jobs.spawn(async move {
-                        let r = async {
-                            store.remote().fetch(conn, hash).await.map_err(|e| anyhow!("{e}"))?;
-                            // verified against its hash on the way in (BLAKE3 = the tile's name)
-                            let bytes = store.blobs().get_bytes(hash).await.map_err(|e| anyhow!("{e}"))?;
-                            let h = hash.to_hex().to_string();
-                            let part = dir.join(format!("{h}.part"));
-                            std::fs::write(&part, &bytes)?;
-                            std::fs::rename(&part, dir.join(&h))?;
-                            anyhow::Ok(())
-                        }
-                        .await;
+                        let r = fetch_one(&store, &conn, hash, z, &dir).await;
                         (hash, r)
                     });
                 }
                 let Some(done) = jobs.join_next().await else { break };
-                if let Ok((hash, Err(e))) = done {
-                    eprintln!("[kopanod] media: tile {} from {}: {e:#}", &hash.to_hex()[..8], &dev[..8]);
-                    still.push(hash);
+                match done {
+                    Ok((hash, Err(e))) => {
+                        eprintln!("[kopanod] media: tile {} from {}: {e:#}", &hash.to_hex()[..8], &dev[..8]);
+                        still.push(hash);
+                    }
+                    Ok((_, Ok(got))) => {
+                        bytes += got.wire;
+                        raw_bytes += got.raw;
+                        n_packed += got.packed as usize;
+                    }
+                    Err(_) => {}
                 }
             }
             conn.close(0u32.into(), b"done");
-            eprintln!("[kopanod] media: {} tile(s) from {}: connect {connect_ms} ms, transfer {} ms", asked - still.len(), &dev[..8], tf.elapsed().as_millis());
+            let ms = tf.elapsed().as_millis() as u64;
+            eprintln!(
+                "[kopanod] media: {} tile(s) from {} ({n_packed} packed): {} KB moved for {} KB of pixels, connect {connect_ms} ms, transfer {ms} ms",
+                asked - still.len(),
+                &dev[..8],
+                bytes / 1000,
+                raw_bytes / 1000
+            );
+            node.emit(json!({"event": "tiles", "project": p.project.id.hex(), "from": &dev[..8], "tiles": asked - still.len(), "packed": n_packed, "kb": bytes / 1000, "raw_kb": raw_bytes / 1000, "ms": ms}));
             left = still;
         }
         anyhow::Ok(want.iter().filter(|h| dir.join(h.as_str()).is_file()).count())
@@ -462,6 +614,15 @@ fn fetch_tiles(p: &Proj, want: &BTreeSet<String>, dir: &Path) -> Result<usize> {
 /// Every media hash this project's versions name (read once per version): what its members may
 /// fetch from this device. Used by media.rs's gate.
 pub fn serves(p: &Proj, hash: &str) -> bool {
+    if !p.binding().is_photo() {
+        return false;
+    }
+    // a packed form is served exactly when its raw object is
+    let raw = p.photo.packed_of.lock().unwrap_or_else(|e| e.into_inner()).get(hash).cloned();
+    serves_raw(p, raw.as_deref().unwrap_or(hash))
+}
+
+fn serves_raw(p: &Proj, hash: &str) -> bool {
     if !p.binding().is_photo() {
         return false;
     }
@@ -492,7 +653,6 @@ mod tests {
     use super::*;
     use kopano_core::connector::{KindInfo, CONTRACT_VERSION};
     use kopano_core::project::AssetRef;
-    use serde_json::{json, Value};
 
     /// A pretend Photo window: items by key; media in a folder; `refuse` makes the next flush fail.
     struct Fake {
@@ -612,6 +772,17 @@ mod tests {
         assert!(live.app.items.is_empty() && live.pending.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
+    }
+
+    /// Only well-formed entries of a teammate's packed answer are used; anything else is fetched raw.
+    #[test]
+    fn a_packed_answer_is_read_defensively() {
+        let (r, z) = (blake3::hash(b"raw").to_hex().to_string(), blake3::hash(b"zst").to_hex().to_string());
+        let v = json!({"packed": {r.clone(): {"hash": z.clone(), "size": 3}, "not-a-hash": {"hash": z.clone()}, z.clone(): {"hash": 7}}});
+        let m = packed_answer(&v);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[&r.parse::<iroh_blobs::Hash>().unwrap()].to_hex().to_string(), z);
+        assert!(packed_answer(&json!({"error": "unknown request"})).is_empty());
     }
 
     #[test]

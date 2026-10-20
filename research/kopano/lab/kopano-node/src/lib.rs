@@ -861,6 +861,11 @@ impl Hub {
                     let reply = media::offer(&self.node, &p, &req).await;
                     write_frame(&mut send, &serde_json::to_vec(&reply)?).await?;
                 }
+                Some("tiles-packed") => {
+                    // which packed form stands for which Photo tile here (photo_binding.rs)
+                    let reply = photo_binding::packed_offer(&p, &req);
+                    write_frame(&mut send, &serde_json::to_vec(&reply)?).await?;
+                }
                 Some("heads") => {
                     let heads: Vec<String> = p.head().into_iter().map(|h| h.hex()).collect();
                     write_frame(&mut send, &serde_json::to_vec(&json!({"heads": heads}))?).await?;

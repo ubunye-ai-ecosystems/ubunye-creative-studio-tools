@@ -28,7 +28,10 @@
 //! metadata) on every update, so it travels with the `.pcraft` file.
 //!
 //! Media: every tile and blob the items name is kept in `media/<blake3>` (raw bytes). Before
-//! `apply` the node must have fetched the assets an item names into that folder.
+//! `apply` the node must have fetched the assets an item names into that folder. Beside it,
+//! `media/zst/<blake3>.zst` keeps the same object zstd-compressed (Photo's own bundle bytes, or
+//! the bytes staged to Photo), so the node can send a teammate about half the bytes. The item
+//! still names the raw BLAKE3; whoever unpacks checks that hash before using the pixels.
 //!
 //! Changes are applied lazily: `apply` updates the connector's model, and the next `snapshot`
 //! (or `flush`) sends one update to Photo, which is one undo step there.
@@ -477,6 +480,10 @@ impl PhotoConnector {
                 ensure!(blake3::hash(&raw).to_hex().as_str() == h, "Photo sent object {h} whose bytes do not match its hash");
                 self.traffic.fetched_objects += 1;
                 self.traffic.fetched_zstd_bytes += zst.len() as u64;
+                // Photo's own compressed bytes are kept too: teammates are sent those
+                if !packed_path(&self.media, h).is_file() {
+                    keep_packed(&self.media, h, &zst, raw.len())?;
+                }
                 write_media(&self.media_path(h), &raw)?;
             }
             if let Some(m) = r["missing"].as_array().filter(|m| !m.is_empty()) {
@@ -514,7 +521,15 @@ impl PhotoConnector {
         for h in need.difference(&have) {
             let raw = std::fs::read(self.media_path(h)).with_context(|| format!("media {h} is not here yet; fetch it before applying"))?;
             ensure!(blake3::hash(&raw).to_hex().as_str() == h, "media file {h} is damaged");
-            let zst = ruzstd::encoding::compress_to_vec(raw.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+            // the kept zstd form is cheaper to check than to make again
+            let zst = match std::fs::read(packed_path(&self.media, h)) {
+                Ok(z) if unpack(&z, h, raw.len() as u64).is_ok() => z,
+                _ => {
+                    let z = pack(&raw);
+                    keep_packed(&self.media, h, &z, raw.len())?;
+                    z
+                }
+            };
             if batch_bytes + zst.len() > STAGE_BATCH && !batch.is_empty() {
                 self.t.exec("kopano.stage", json!({"objects": std::mem::take(&mut batch)}))?;
                 batch_bytes = 0;
@@ -706,6 +721,36 @@ impl PhotoConnector {
     }
 }
 
+/// Where the zstd form of raw object `hash` is kept in a media folder.
+pub fn packed_path(media: &Path, hash: &str) -> PathBuf {
+    media.join("zst").join(format!("{hash}.zst"))
+}
+
+/// The zstd form of an object (the same encoder Photo's bundles use).
+pub fn pack(raw: &[u8]) -> Vec<u8> {
+    ruzstd::encoding::compress_to_vec(raw, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
+/// Unpack a zstd object and prove it is raw object `hash` (at most `max` bytes): bytes that do
+/// not decompress to exactly that BLAKE3 are refused, whoever sent them.
+pub fn unpack(zst: &[u8], hash: &str, max: u64) -> Result<Vec<u8>> {
+    let mut raw = Vec::new();
+    ruzstd::decoding::StreamingDecoder::new(zst).map_err(|e| anyhow!("object {}: {e}", &hash[..8.min(hash.len())]))?.take(max + 1).read_to_end(&mut raw)?;
+    ensure!(raw.len() as u64 <= max, "object {} unpacks to more than {max} bytes", &hash[..8.min(hash.len())]);
+    ensure!(blake3::hash(&raw).to_hex().as_str() == hash, "object {} does not unpack to its hash", &hash[..8.min(hash.len())]);
+    Ok(raw)
+}
+
+/// Keep the zstd form of `hash` beside its raw file, if it is smaller.
+pub fn keep_packed(media: &Path, hash: &str, zst: &[u8], raw_len: usize) -> Result<()> {
+    let p = packed_path(media, hash);
+    if zst.len() >= raw_len {
+        return Ok(());
+    }
+    std::fs::create_dir_all(p.parent().context("packed path has no folder")?)?;
+    write_media(&p, zst)
+}
+
 fn write_media(path: &Path, raw: &[u8]) -> Result<()> {
     let tmp = path.with_extension("part");
     std::fs::write(&tmp, raw)?;
@@ -842,5 +887,34 @@ impl Harness for PhotoConnector {
     fn sample(&self) -> (String, String, String) {
         // The demo's Exposure layer; exposure and gamma are independent sliders.
         (self.sample_key.clone(), "content.adjustment.Exposure.exposure".into(), "content.adjustment.Exposure.gamma".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A packed tile is used only if it unpacks to exactly the raw BLAKE3 the item names.
+    #[test]
+    fn packed_tiles_are_checked_against_the_raw_hash() {
+        let raw: Vec<u8> = (0..256 * 256 * 4).map(|i| ((i / 4) % 251) as u8 ^ (i % 4) as u8).collect();
+        let hash = blake3::hash(&raw).to_hex().to_string();
+        let z = pack(&raw);
+        assert!(z.len() < raw.len() / 2, "a smooth tile packs well ({} bytes)", z.len());
+        assert_eq!(unpack(&z, &hash, raw.len() as u64).unwrap(), raw);
+        // another tile's bytes under this name: refused
+        let other = pack(&raw[..raw.len() - 4]);
+        assert!(unpack(&other, &hash, raw.len() as u64).is_err());
+        // a bomb is cut off at the limit
+        assert!(unpack(&z, &hash, 1000).is_err());
+        assert!(unpack(b"not zstd", &hash, 1 << 20).is_err());
+        // kept beside the raw file only when it is smaller
+        let d = std::env::temp_dir().join(format!("kopano-photo-pack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        keep_packed(&d, &hash, &z, raw.len()).unwrap();
+        assert_eq!(std::fs::read(packed_path(&d, &hash)).unwrap(), z);
+        keep_packed(&d, "ab", &[0u8; 10], 10).unwrap();
+        assert!(!packed_path(&d, "ab").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
