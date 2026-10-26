@@ -492,12 +492,17 @@ pub fn bring_to_head<A: FilmApp + ?Sized>(store: &RedbStore, pr: &Project, cert:
 
 // ---- footage: serving ------------------------------------------------------------------------------
 
-/// The Film engine that makes proxies: KOPANO_FILM_CLI, else next to kopanod, else on PATH.
-pub fn film_cli() -> String {
+/// The Film engine that makes proxies: KOPANO_FILM_CLI, else the path Film wrote to
+/// `<home>/film-cli.path` at its last launch (one shared kopanod per computer is no longer
+/// beside Film's files), else next to kopanod, else on PATH.
+pub fn film_cli(home: &Path) -> String {
     if let Ok(c) = std::env::var("KOPANO_FILM_CLI") {
         if !c.is_empty() {
             return c;
         }
+    }
+    if let Some(p) = std::fs::read_to_string(home.join("film-cli.path")).ok().map(|s| s.lines().next().unwrap_or_default().trim().to_string()).filter(|p| !p.is_empty() && Path::new(p).is_file()) {
+        return p;
     }
     let exe = if cfg!(windows) { "filmcraft-cli.exe" } else { "filmcraft-cli" };
     std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(exe))).filter(|p| p.is_file()).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| exe.into())
@@ -585,7 +590,7 @@ pub async fn offer(node: &Arc<Node>, p: &Arc<Proj>, req: &Value) -> Result<Offer
                 }
             }
             let dir = m.dir.join(format!("made-{}", &hash[..16]));
-            let (cli, src, d2) = (film_cli(), PathBuf::from(&path), dir.clone());
+            let (cli, src, d2) = (film_cli(&node.device.home), PathBuf::from(&path), dir.clone());
             let t = Instant::now();
             let out = tokio::task::spawn_blocking(move || make_proxy(&cli, &src, &d2)).await??;
             let ms = t.elapsed().as_millis() as u64;
@@ -1051,6 +1056,24 @@ mod tests {
     }
     fn repo(t: &Team, head: Option<Id>) -> Repo<'_> {
         Repo { store: &t.store, project: Project::load(&t.store, &t.pr.id).unwrap(), head, cert: t.cert.clone(), key: DeviceKey::from_bytes(t.key.to_bytes()) }
+    }
+
+    /// One shared kopanod per computer is not beside Film: Film tells it where its engine is.
+    #[test]
+    fn the_film_engine_is_found_where_film_said_it_is() {
+        if std::env::var_os("KOPANO_FILM_CLI").is_some() {
+            return;
+        }
+        let home = std::env::temp_dir().join(format!("kopano-film-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let cli = home.join("filmcraft-cli-test.exe");
+        std::fs::write(&cli, b"").unwrap();
+        std::fs::write(home.join("film-cli.path"), format!("{}\n", cli.display())).unwrap();
+        assert_eq!(film_cli(&home), cli.to_string_lossy());
+        // a path that is gone (Film uninstalled) is not used
+        std::fs::remove_file(&cli).unwrap();
+        assert_ne!(film_cli(&home), cli.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

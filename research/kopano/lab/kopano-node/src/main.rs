@@ -2,7 +2,8 @@
 //!
 //!   kopanod init                 make this computer's device key (kept in the OS key store)
 //!   kopanod id                   print this computer's device id
-//!   kopanod run                  run until stopped
+//!   kopanod run [--standby]      run until stopped (--standby: if another kopanod already runs
+//!                                here, wait and take over when it stops; start-at-login uses it)
 //!   kopanod autostart on|off     start (or stop starting) kopanod when this user signs in
 //!   kopanod import --from <lab peer dir>    take a lab project in (lab tests; real people sign in)
 //!   kopanod call --json '{"op":..}'          one request, as an app would
@@ -62,7 +63,7 @@ const OLD_RUN_VALUE: &str = "Kopano";
 /// LaunchAgent on macOS, a systemd user unit on Linux.
 fn autostart(on: bool, home: &Path, port: u16) -> Result<()> {
     let exe = std::env::current_exe()?;
-    let cmdline = format!("\"{}\" run --home \"{}\" --api-port {port}", exe.display(), home.display());
+    let cmdline = format!("\"{}\" run --home \"{}\" --api-port {port} --standby", exe.display(), home.display());
     let run = |c: &mut std::process::Command| -> Result<()> {
         // the installed kopanod has no console of its own (S4): keep reg.exe from opening one
         #[cfg(windows)]
@@ -88,8 +89,11 @@ fn autostart(on: bool, home: &Path, port: u16) -> Result<()> {
         if on {
             std::fs::create_dir_all(plist.parent().context("plist folder")?)?;
             std::fs::write(&plist, format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>org.ubunye.kopano</string>\n<key>ProgramArguments</key><array><string>{}</string><string>run</string><string>--home</string><string>{}</string><string>--api-port</string><string>{port}</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n",
-                exe.display(), home.display()))?;
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>org.ubunye.kopano</string>\n<key>ProgramArguments</key><array><string>{}</string><string>run</string><string>--home</string><string>{}</string><string>--api-port</string><string>{port}</string><string>--standby</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>PathState</key><dict><key>{}</key><true/></dict></dict>\n<key>AssociatedBundleIdentifiers</key><array><string>org.ubunye.creative.light</string><string>org.ubunye.creative.photo</string><string>org.ubunye.creative.film</string></array>\n</dict></plist>\n",
+                exe.display(), home.display(), exe.display()))?;
+            // kept alive only while this kopanod exists (a trashed app's copy is not retried
+            // forever); an agent already loaded keeps its old job unless it is unloaded first
+            let _ = std::process::Command::new("launchctl").arg("unload").arg(&plist).output();
             run(std::process::Command::new("launchctl").args(["load", "-w"]).arg(&plist))
         } else {
             let _ = std::process::Command::new("launchctl").args(["unload", "-w"]).arg(&plist).output();
@@ -114,11 +118,11 @@ fn autostart(on: bool, home: &Path, port: u16) -> Result<()> {
 /// get answers, nothing goes online), then online until stopped or signed out. Signing out ends
 /// the round and dropping its runtime ends every task of that identity (watch loops, app
 /// bindings), so the next round starts clean, back in the not-signed-in state.
-fn run(home: &Path, port: u16) -> Result<()> {
+fn run(home: &Path, port: u16, standby: bool) -> Result<()> {
     let mut first = true;
     loop {
         let rt = tokio::runtime::Runtime::new()?;
-        let again = rt.block_on(round(home, port, first));
+        let again = rt.block_on(round(home, port, first, standby));
         rt.shutdown_timeout(Duration::from_secs(5));
         if !again? {
             return Ok(());
@@ -128,14 +132,27 @@ fn run(home: &Path, port: u16) -> Result<()> {
 }
 
 /// One round of `run`. True: signed out, start again.
-async fn round(home: &Path, port: u16, first: bool) -> Result<bool> {
+async fn round(home: &Path, port: u16, first: bool, standby: bool) -> Result<bool> {
     // The port first: a second kopanod for this computer stops here, before it could go online
     // with the same identity (S4: the app and start-at-login may both start one). After a
-    // sign-out this process takes its own port back.
+    // sign-out this process takes its own port back. `--standby` (start at login): wait quietly
+    // and take over when the running one stops, instead of failing and being restarted by
+    // launchd or systemd every few seconds.
     let mut tries = if first { 1 } else { 50 };
+    let mut said = false;
     let listener = loop {
         match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => break l,
+            Err(_) if standby && first => {
+                if !said {
+                    eprintln!("[kopanod] another kopanod runs on this computer (port {port}); standing by");
+                    said = true;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    _ = tokio::signal::ctrl_c() => return Ok(false),
+                }
+            }
             Err(_) if tries > 1 => {
                 tries -= 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -196,7 +213,7 @@ fn main() -> Result<()> {
             println!("{{\"autostart\":{on}}}");
             Ok(())
         }
-        Some("run") => run(&home, port),
+        Some("run") => run(&home, port, args.iter().any(|a| a == "--standby")),
         Some("import") => {
             let pid = import_peer_dir(&home, &PathBuf::from(arg(&args, "--from").context("--from")?))?;
             println!("{{\"imported\":\"{pid}\"}}");
