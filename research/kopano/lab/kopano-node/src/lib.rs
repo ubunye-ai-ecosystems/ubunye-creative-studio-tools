@@ -21,6 +21,9 @@ pub mod approve;
 pub mod film_binding;
 pub mod media;
 pub mod photo_binding;
+pub mod share;
+pub mod signin;
+pub mod tv;
 pub mod unlinked;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -50,7 +53,35 @@ const MAX_FRAME: usize = 64 << 20;
 pub struct Device {
     pub home: PathBuf,
     pub key: DeviceKey,
-    pub cert: DeviceCert,
+    pub cert: LiveCert,
+}
+
+/// The device certificate, replaced in place when it is renewed (signin.rs), so a renewal needs
+/// no restart. Reads hand out the certificate current at that moment. Each replaced one is kept
+/// in memory (one small value per renewal, about once a month), which is what makes the plain
+/// `&DeviceCert` borrows everywhere safe without a lock held.
+pub struct LiveCert(std::sync::RwLock<&'static DeviceCert>);
+
+impl LiveCert {
+    pub fn new(c: DeviceCert) -> Self {
+        Self(std::sync::RwLock::new(Box::leak(Box::new(c))))
+    }
+    pub fn set(&self, c: DeviceCert) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Box::leak(Box::new(c));
+    }
+}
+
+impl std::ops::Deref for LiveCert {
+    type Target = DeviceCert;
+    fn deref(&self) -> &DeviceCert {
+        *self.0.read().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl serde::Serialize for LiveCert {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        (**self).serialize(s)
+    }
 }
 
 impl Device {
@@ -60,7 +91,7 @@ impl Device {
         if cert.body.device != key.public_hex() {
             bail!("cert.json is for another device key");
         }
-        Ok(Self { home: home.into(), key, cert })
+        Ok(Self { home: home.into(), key, cert: LiveCert::new(cert) })
     }
     pub fn id(&self) -> String {
         self.cert.body.device.clone()
@@ -92,6 +123,8 @@ pub struct Proj {
     photo: photo_binding::Slot,
     /// "I approve changes" projects: refs, members log, review (approve.rs)
     pub review: approve::State,
+    /// this person left the project (share.rs): its loops stop, it is not opened again
+    pub(crate) gone: std::sync::atomic::AtomicBool,
 }
 
 /// Which app holds this project's items on this device.
@@ -146,6 +179,7 @@ impl Proj {
             media: Default::default(),
             photo: Default::default(),
             review: approve::State::load(dir),
+            gone: Default::default(),
         })
     }
     /// Run `f` against this project's app: the toy editor file, or Light (connected on first use
@@ -379,6 +413,14 @@ impl Proj {
     pub fn online(&self) -> BTreeMap<String, String> {
         self.online.lock().unwrap().clone()
     }
+    /// Anyone besides the owner on the project: the genesis, or (approve mode) the members log,
+    /// where people invited on ThabangVision are added later (share.rs).
+    pub fn has_teammates(&self) -> bool {
+        self.project.genesis.members.len() > 1 || (self.project.approve_mode() && approve::members(self).is_ok_and(|m| m.map.len() > 1))
+    }
+    pub fn is_gone(&self) -> bool {
+        self.gone.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 // ---- the node ----------------------------------------------------------------------------------
@@ -393,6 +435,10 @@ pub struct Node {
     /// a new random number each time the service starts: a watch carries it, so a teammate can
     /// tell that this service restarted (and that its own watch of us is on a dead connection)
     boot: u64,
+    /// the service should go offline (signed out): main.rs stops this node
+    pub stop: tokio::sync::Notify,
+    /// per shared project: when the owner's device last asked ThabangVision who is in it (share.rs)
+    pub(crate) mirror_asked: std::sync::Mutex<HashMap<Id, Instant>>,
 }
 
 impl Node {
@@ -401,6 +447,9 @@ impl Node {
         let mut projects = HashMap::new();
         if let Ok(rd) = std::fs::read_dir(home.join("projects")) {
             for e in rd.flatten() {
+                if e.path().join("left").exists() {
+                    continue; // this person left that project (share.rs)
+                }
                 match Proj::open(&e.path()) {
                     Ok(p) => {
                         if let Some(e) = p.heal_head() {
@@ -412,7 +461,7 @@ impl Node {
                 }
             }
         }
-        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default(), media: Default::default(), boot: rand::random() }))
+        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default(), media: Default::default(), boot: rand::random(), stop: Default::default(), mirror_asked: Default::default() }))
     }
 
     pub fn project(&self, id: &str) -> Result<Arc<Proj>> {
@@ -420,7 +469,7 @@ impl Node {
         ps.values().find(|p| p.project.id.hex() == id || p.project.id.hex().starts_with(id) && id.len() >= 8).cloned().context("no such project on this device")
     }
 
-    fn emit(&self, v: Value) {
+    pub(crate) fn emit(&self, v: Value) {
         eprintln!("[kopanod] {v}");
         let _ = self.events.send(v);
     }
@@ -467,11 +516,19 @@ impl Node {
         tokio::spawn(async move {
             let mut wait = 1u64;
             loop {
+                if p.is_gone() {
+                    p.following.lock().unwrap().remove(&device);
+                    return;
+                }
                 let started = Instant::now();
                 let r = tokio::select! {
                     r = node.watch(&p, &device) => r,
                     _ = kick.notified() => Err(anyhow!("the teammate's service restarted; watching it anew")),
                 };
+                if p.is_gone() {
+                    p.following.lock().unwrap().remove(&device);
+                    return;
+                }
                 if let Err(e) = r {
                     if p.online.lock().unwrap().remove(&device).is_some() {
                         node.emit(json!({"event": "teammate", "project": p.project.id.hex(), "device": device, "online": false}));
@@ -661,6 +718,9 @@ impl Node {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
+                if p.is_gone() {
+                    return;
+                }
                 // a device that just joined must take the project's versions first: saving its
                 // own app state before that would start a second history and force a merge
                 if p.head().is_none() {
@@ -772,6 +832,8 @@ impl Node {
             }
         }
         std::fs::write(dir.join("project"), pid)?;
+        // joining again after leaving (share.rs): this folder is the project's again
+        let _ = std::fs::remove_file(dir.join("left"));
         std::fs::write(dir.join("binding.json"), serde_json::to_vec(&binding)?)?;
         std::fs::write(dir.join("app.json"), b"{}")?;
         let p = Arc::new(Proj::open(&dir)?);
@@ -893,7 +955,15 @@ impl Hub {
         };
         let (mut send, mut recv, cert, pid) = tokio::time::timeout(Duration::from_secs(HANDSHAKE_S), hello).await.map_err(|_| anyhow!("no certificate within {HANDSHAKE_S} s"))??;
         let their: DeviceCert = serde_json::from_slice(&cert)?;
-        let p = match self.node.project(std::str::from_utf8(&pid)?).and_then(|p| p.check_peer(&their, &remote).map(|_| p)) {
+        let pid = std::str::from_utf8(&pid)?;
+        let mut found = self.node.project(pid).and_then(|p| p.check_peer(&their, &remote).map(|_| p));
+        if found.is_err() {
+            // someone invited on ThabangVision knocks before this device signed them in
+            if let Some(p) = share::admit(&self.node, pid, &their, &remote).await {
+                found = Ok(p);
+            }
+        }
+        let p = match found {
             Ok(p) => p,
             Err(e) => {
                 write_frame(&mut send, format!("refused: {e}").as_bytes()).await?;
@@ -1070,12 +1140,12 @@ pub(crate) fn compact_payload_of(p: &Proj, have: &[Id], heads: &[Id], extra: &[V
 // ---- local API for apps: one JSON request per line on 127.0.0.1, token required --------------
 
 pub async fn serve_api(node: Arc<Node>, port: u16) -> Result<()> {
-    serve_api_on(node, tokio::net::TcpListener::bind(("127.0.0.1", port)).await?).await
+    serve_api_on(node, &tokio::net::TcpListener::bind(("127.0.0.1", port)).await?).await
 }
 
 /// The API on a port already bound (kopanod binds it before going online, so a second kopanod
 /// for this computer stops there instead of running the same identity twice).
-pub async fn serve_api_on(node: Arc<Node>, l: tokio::net::TcpListener) -> Result<()> {
+pub async fn serve_api_on(node: Arc<Node>, l: &tokio::net::TcpListener) -> Result<()> {
     let token = api_token(&node.device.home)?;
     loop {
         let (c, _) = l.accept().await?;
@@ -1118,6 +1188,7 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
     match s("op")? {
         "hello" => Ok(json!({"device": node.device.id(), "name": node.device.cert.body.name, "account": node.device.cert.body.account,
             "signed_in": node.device.cert.body.expires_ms > now_ms(), "signed_in_until_ms": node.device.cert.body.expires_ms,
+            "signing_in": null, "message": null, "server": tv::base_url(&node.device.home).ok(),
             "projects": node.projects.read().unwrap().values().map(|p| json!({"id": p.project.id.hex(), "name": p.project.genesis.name, "app": p.binding()})).collect::<Vec<_>>()})),
         "status" => {
             let p = node.project(s("project")?)?;
@@ -1245,6 +1316,23 @@ async fn api(node: &Arc<Node>, req: &Value) -> Result<Value> {
             node.add_teammate(p, s("device")?)?;
             Ok(json!("following"))
         }
+        // ---- signed in with ThabangVision (signin.rs, share.rs; API.md) ----
+        "sign-in" => bail!("This computer is already signed in."),
+        "sign-in-cancel" => Ok(json!("not signing in")),
+        "sign-out" => {
+            signin::sign_out(node, None)?;
+            Ok(json!("signed out"))
+        }
+        "share" => share::share(node, &node.project(s("project")?)?).await,
+        "invite" => share::invite(node, &node.project(s("project")?)?, s("email")?, req.get("role").and_then(Value::as_str)).await,
+        "people" => share::people(node, &node.project(s("project")?)?).await,
+        "shared-projects" => share::list(node).await,
+        "join-shared" => {
+            let binding: Binding = serde_json::from_value(req.get("app").cloned().unwrap_or(json!({"kind": "toy"})))?;
+            share::join_shared(node, s("shared")?, binding).await
+        }
+        "leave" => share::leave(node, s("project")?).await,
+        "remove-person" => share::remove(node, &node.project(s("project")?)?, s("user")?).await,
         o => bail!("unknown op {o}"),
     }
 }

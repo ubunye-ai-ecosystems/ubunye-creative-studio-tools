@@ -790,7 +790,7 @@ async fn take_in(node: &Arc<Node>, p: &Arc<Proj>) -> Result<usize> {
 }
 
 async fn ahead(node: &Arc<Node>, p: &Arc<Proj>, want: &BTreeMap<String, kopano_core::project::AssetRef>, shown: &BTreeMap<String, MediaHere>) {
-    let (Some(m), true) = (node.media.get(), p.project.genesis.members.len() > 1) else { return };
+    let (Some(m), true) = (node.media.get(), p.has_teammates()) else { return };
     if m.ahead_off.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }

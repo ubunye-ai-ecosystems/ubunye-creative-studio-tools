@@ -1020,6 +1020,32 @@ pub async fn set_approver(node: &Node, p: &Proj, who: &str, approver: bool) -> R
     Ok(json!({"account": account, "approver": approver}))
 }
 
+/// Sign several members changes (people invited or removed on ThabangVision, share.rs), then
+/// seal main like `set_approver`. Only an admin's entries count (workflow.rs); the caller checks.
+pub async fn change_members(node: &Node, p: &Proj, ops: Vec<MemberOp>) -> Result<usize> {
+    if ops.is_empty() {
+        return Ok(0);
+    }
+    let w = p.write.lock().await;
+    for op in &ops {
+        let tips_m = wf::member_tips(&p.store, &p.review.members());
+        let e = wf::add_member_entry(&p.store, &p.project, tips_m, op.clone(), &node.device.cert, &node.device.key)?;
+        p.store.flush()?;
+        learn(p, &[], &[e])?;
+    }
+    let (t, _) = tips(p)?;
+    if let Some((mid, mu)) = t.get(MAIN).cloned() {
+        let seen = wf::member_tips(&p.store, &p.review.members());
+        let s = wf::seal_main(&p.store, &p.project, (mid, &mu), &seen, &node.device.cert, &node.device.key)?;
+        p.store.flush()?;
+        learn(p, &[s], &[])?;
+    }
+    drop(w);
+    let _ = p.heads.send(p.head().unwrap_or(p.project.id));
+    notify(node, p);
+    Ok(ops.len())
+}
+
 /// Status lines for `status`: who approves, what waits, what this person's work is at.
 pub fn status_fields(node: &Node, p: &Proj) -> Value {
     if !on(p) {
@@ -1421,6 +1447,55 @@ mod tests {
         t.both().await?;
         approve(&t.nodes[0], &t.p(0), "acct-m1", None, None, &Map::new()).await?;
         assert_eq!(t.get(0, "photo-0001", "develop.exposure"), 0.8);
+        Ok(())
+    }
+
+    /// Signed in with ThabangVision (share.rs): Carol accepts an invite, the owner's device signs
+    /// her into the members log and her computer is let in; removed on the website, she is
+    /// refused again. Peers decide from the log, never from the website.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn someone_invited_on_thabangvision_is_let_in_only_while_on_the_log() -> Result<()> {
+        let provider = Provider::generate();
+        let (da, dc) = (temp("tvlog-a"), temp("tvlog-c"));
+        home(&provider, &da, "acct-alice", "Alice")?;
+        home(&provider, &dc, "acct-carol", "Carol")?;
+        let (a, c) = (Node::open(&da)?, Node::open(&dc)?);
+        let p = a.create_project_mode("shoot", Binding::Toy, BTreeMap::new(), Some("approve"))?;
+        let carol = c.device.cert.clone();
+        let rid: [u8; 32] = hex::decode(&carol.body.device)?.try_into().unwrap();
+        assert!(p.check_peer(&carol, &rid).is_err(), "not invited: refused");
+        assert!(!p.has_teammates());
+        let accepted = BTreeMap::from([("acct-carol".to_string(), "editor".to_string())]);
+        assert_eq!(change_members(&a, &p, crate::share::plan(&members(&p)?, &accepted, &BTreeSet::new())).await?, 1);
+        p.check_peer(&carol, &rid)?;
+        assert!(p.has_teammates(), "previews are made ahead for her now");
+        assert!(!members(&p)?.is_approver("acct-carol"));
+        let synced = BTreeSet::from(["acct-carol".to_string()]);
+        assert!(crate::share::plan(&members(&p)?, &accepted, &synced).is_empty(), "nothing signed twice");
+        assert_eq!(change_members(&a, &p, crate::share::plan(&members(&p)?, &BTreeMap::new(), &synced)).await?, 1);
+        assert!(p.check_peer(&carol, &rid).is_err(), "removed: refused");
+        Ok(())
+    }
+
+    /// A certificate ThabangVision stopped renewing (computer unlinked, account suspended) is
+    /// refused by peers once it expires, member or not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_expired_certificate_is_refused_by_peers() -> Result<()> {
+        let provider = Provider::generate();
+        let da = temp("expired-a");
+        home(&provider, &da, "acct-alice", "Alice")?;
+        let a = Node::open(&da)?;
+        let members = BTreeMap::from([("acct-m1".to_string(), project::Member { role: project::Role::Editor, lanes: vec![] })]);
+        let p = a.create_project_mode("shoot", Binding::Toy, members, Some("approve"))?;
+        let key = DeviceKey::generate();
+        let rid: [u8; 32] = hex::decode(key.public_hex())?.try_into().unwrap();
+        let old = provider.issue("acct-m1", "Member1", &key, "laptop", 1)?;
+        std::thread::sleep(Duration::from_millis(5));
+        let e = p.check_peer(&old, &rid).unwrap_err();
+        assert!(format!("{e:#}").contains("expired"), "{e:#}");
+        p.check_peer(&provider.issue("acct-m1", "Member1", &key, "laptop", 3_600_000)?, &rid)?;
+        // a certificate from an issuer the project does not trust is refused too
+        assert!(p.check_peer(&Provider::generate().issue("acct-m1", "Member1", &key, "laptop", 3_600_000)?, &rid).is_err());
         Ok(())
     }
 

@@ -4,18 +4,23 @@
 //!   kopanod id                   print this computer's device id
 //!   kopanod run                  run until stopped
 //!   kopanod autostart on|off     start (or stop starting) kopanod when this user signs in
-//!   kopanod import --from <lab peer dir>    take a lab project in (stand-in for sign-in)
+//!   kopanod import --from <lab peer dir>    take a lab project in (lab tests; real people sign in)
 //!   kopanod call --json '{"op":..}'          one request, as an app would
 //!   kopanod watch                print live events, as an app panel would
 //!
 //! Every command takes [--home H] [--api-port P]. Defaults, shared with the apps' Kopano panels:
 //! home = KOPANO_HOME, else %LOCALAPPDATA%\Kopano (Windows), ~/Library/Application Support/Kopano
 //! (macOS), ~/.local/share/kopano (Linux); API port = KOPANO_API_PORT, else 47100.
+//!
+//! Signing in: `kopanod call --json '{"op":"sign-in"}'` (what the apps' button does; API.md).
+//! ThabangVision's address: KOPANO_TV_URL, else <home>/server.json, else the local test server
+//! (tv.rs).
 
 use anyhow::{bail, Context, Result};
 use kopano_core::identity::DeviceKey;
-use kopano_node::{api_token, import_peer_dir, keystore, serve_api_on, unlinked, Node};
+use kopano_node::{api_token, import_peer_dir, keystore, serve_api_on, share, signin, unlinked, Node};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -105,8 +110,68 @@ fn autostart(on: bool, home: &Path, port: u16) -> Result<()> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// The service until it is stopped. Each round runs on its own runtime: not signed in (the apps
+/// get answers, nothing goes online), then online until stopped or signed out. Signing out ends
+/// the round and dropping its runtime ends every task of that identity (watch loops, app
+/// bindings), so the next round starts clean, back in the not-signed-in state.
+fn run(home: &Path, port: u16) -> Result<()> {
+    let mut first = true;
+    loop {
+        let rt = tokio::runtime::Runtime::new()?;
+        let again = rt.block_on(round(home, port, first));
+        rt.shutdown_timeout(Duration::from_secs(5));
+        if !again? {
+            return Ok(());
+        }
+        first = false;
+    }
+}
+
+/// One round of `run`. True: signed out, start again.
+async fn round(home: &Path, port: u16, first: bool) -> Result<bool> {
+    // The port first: a second kopanod for this computer stops here, before it could go online
+    // with the same identity (S4: the app and start-at-login may both start one). After a
+    // sign-out this process takes its own port back.
+    let mut tries = if first { 1 } else { 50 };
+    let listener = loop {
+        match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(l) => break l,
+            Err(_) if tries > 1 => {
+                tries -= 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => return Err(e).with_context(|| format!("kopanod is already running on this computer (port {port} is taken)")),
+        }
+    };
+    init(home)?;
+    let token = api_token(home)?; // before going online, so an app can read it straight away
+    // not signed in yet (a fresh install, or signed out): answer the apps, stay offline
+    if !home.join("cert.json").exists() {
+        tokio::select! {
+            r = unlinked::serve_until_signed_in(home, &listener, token) => r?,
+            _ = tokio::signal::ctrl_c() => return Ok(false),
+        }
+    }
+    let node = Node::open(home)?;
+    let router = node.start().await?;
+    eprintln!("[kopanod] {} online as {}, {} project(s), app port {port}", node.device.cert.body.name, &node.device.id()[..8], node.projects.read().unwrap_or_else(|e| e.into_inner()).len());
+    tokio::spawn(signin::keep_fresh(node.clone()));
+    share::spawn_mirror(node.clone());
+    let again = tokio::select! {
+        r = serve_api_on(node.clone(), &listener) => { r?; false }
+        _ = node.stop.notified() => true,
+        _ = tokio::signal::ctrl_c() => false,
+    };
+    drop(listener);
+    router.shutdown().await?;
+    node.close().await;
+    if again {
+        eprintln!("[kopanod] signed out");
+    }
+    Ok(again)
+}
+
+fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let home = match arg(&args, "--home") {
         Some(h) => PathBuf::from(h),
@@ -131,40 +196,13 @@ async fn main() -> Result<()> {
             println!("{{\"autostart\":{on}}}");
             Ok(())
         }
-        Some("run") => {
-            // The port first: a second kopanod for this computer stops here, before it could go
-            // online with the same identity (S4: the app and start-at-login may both start one).
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-                .await
-                .with_context(|| format!("kopanod is already running on this computer (port {port} is taken)"))?;
-            init(&home)?;
-            let token = api_token(&home)?; // before going online, so an app can read it straight away
-            // not signed in yet (a fresh install): answer the apps, stay offline (unlinked.rs)
-            let listener = if home.join("cert.json").exists() {
-                listener
-            } else {
-                tokio::select! {
-                    l = unlinked::serve_until_signed_in(&home, listener, token) => l?,
-                    _ = tokio::signal::ctrl_c() => return Ok(()),
-                }
-            };
-            let node = Node::open(&home)?;
-            let router = node.start().await?;
-            eprintln!("[kopanod] {} online as {}, {} project(s), app port {port}", node.device.cert.body.name, &node.device.id()[..8], node.projects.read().unwrap_or_else(|e| e.into_inner()).len());
-            tokio::select! {
-                r = serve_api_on(node.clone(), listener) => r?,
-                _ = tokio::signal::ctrl_c() => {}
-            }
-            router.shutdown().await?;
-            node.close().await;
-            Ok(())
-        }
+        Some("run") => run(&home, port),
         Some("import") => {
             let pid = import_peer_dir(&home, &PathBuf::from(arg(&args, "--from").context("--from")?))?;
             println!("{{\"imported\":\"{pid}\"}}");
             Ok(())
         }
-        Some(op @ ("call" | "watch")) => {
+        Some(op @ ("call" | "watch")) => tokio::runtime::Runtime::new()?.block_on(async {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
             let token = api_token(&home)?;
             let mut req: serde_json::Value = if op == "call" { serde_json::from_str(&arg(&args, "--json").context("--json")?)? } else { serde_json::json!({"op": "subscribe"}) };
@@ -180,7 +218,7 @@ async fn main() -> Result<()> {
                 }
             }
             Ok(())
-        }
+        }),
         _ => bail!("usage: kopanod init|id|run|autostart|import|call|watch [--home H] [--api-port P] (see the file header)"),
     }
 }

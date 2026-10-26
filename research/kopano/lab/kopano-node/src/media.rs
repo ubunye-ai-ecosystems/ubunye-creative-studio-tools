@@ -621,7 +621,7 @@ pub fn spawn(node: Arc<Node>, p: Arc<Proj>) {
 /// Make the previews of this device's originals before anyone asks, one at a time, so a
 /// teammate who joins gets photos in seconds. Only for projects shared with someone.
 async fn ahead(node: &Arc<Node>, p: &Arc<Proj>) {
-    let (Some(m), true) = (node.media.get(), p.project.genesis.members.len() > 1) else { return };
+    let (Some(m), true) = (node.media.get(), p.has_teammates()) else { return };
     if m.ahead_off.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }

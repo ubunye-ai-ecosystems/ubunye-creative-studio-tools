@@ -1945,6 +1945,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "blake3",
+ "ed25519-dalek 2.2.0",
  "futures-lite",
  "hex",
  "iroh",
@@ -1955,8 +1956,11 @@ dependencies = [
  "miniz_oxide",
  "noq-proto",
  "rand 0.8.8",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 

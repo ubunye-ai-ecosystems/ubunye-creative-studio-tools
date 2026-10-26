@@ -25,3 +25,8 @@ keyring = { version = "=3.6.3", features = ["windows-native", "apple-native"] }
 blake3.workspace = true
 iroh-blobs.workspace = true
 futures-lite = "=2.6.1"
+ed25519-dalek.workspace = true
+# ThabangVision sign-in and the project mirror (tv.rs): the HTTP client iroh already builds
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"
