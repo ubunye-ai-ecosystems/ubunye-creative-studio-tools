@@ -590,3 +590,64 @@ Still open after S8:
   approve project's genesis (its signature no longer checks without the mode field), so it can
   not join one by mistake. Adding and removing members and blocking a device have no API yet
   (only `set-approver`).
+
+## 10. Slice "sign-in": signed in with ThabangVision, invited by email (2026-10-26)
+
+Before this slice kopanod had no ThabangVision client: the panels said "Sign-in is coming soon",
+a teammate's email went to kopanod as a raw account id, and teammates joined with test ids. Code:
+`lab/kopano-node/src/tv.rs` (the HTTP contract, `docs/kopano/desktop-api.md` in ThabangVision),
+`signin.rs` (device flow, renewal, sign out), `share.rs` (projects with people); local API in
+`lab/kopano-node/API.md`; test `lab/scenarios/s9_signin.py`.
+
+**How it works**
+
+1. Sign in: `sign-in` asks ThabangVision for a code (device public key, computer name, system),
+   opens the browser at `/link?code=...` and polls with a signature by the device key. The
+   certificate is kept only if it is for this device, not expired and signed by a key
+   `/.well-known/kopano-keys.json` publishes (`issuers.json`). The unlinked service sees
+   `cert.json` and goes online. The device key never leaves the OS key store.
+2. Renewal in place: less than 7 days left (or expired at start) renews with a signed challenge;
+   the new certificate replaces the old one in the running service (`LiveCert`), no restart.
+   Only certificates ThabangVision issued are renewed there (lab ones are left alone).
+   "revoked" or "suspended" signs this computer out and `hello.message` says why.
+3. Sign out: `cert.json` goes, the round ends and its runtime is dropped (every task of that
+   identity ends), the next round is the unlinked service on the same port.
+4. Sharing: `invite {email}` shares the project first (`tv.json` keeps ThabangVision's id), then
+   always answers "Invite sent.". Bob's `shared-projects` lists it; `join-shared` accepts (3g),
+   asks which computers to dial (3h, owner first) and joins. Alice's computer signs him into the
+   project's members log when he knocks (one question to ThabangVision per project per 4 s), when
+   she opens People, and every 5 minutes. Peers decide from the log, offline, as before.
+   Only accounts the mirror added are ever taken out by it.
+5. Leave and remove go to ThabangVision first; the owner's computer then signs the removal, and
+   it travels to the removed person's computer, which refuses its own edits from then on.
+
+**Real test (S9, this PC, two kopanod, local `next dev` of ThabangVision on the DEV database, two
+throwaway accounts made and deleted by the test, links approved on the dev database the way
+/link does): 28 of 28 checks, three runs in a row.**
+
+| Step | Result |
+|---|---|
+| Sign in (code, approve, online) | 10.4 to 11.9 s (two 5 s polls) |
+| Invite Bob's email / an address with no account | "Invite sent." both, same answer |
+| Bob joins from Shared with me, no ids | 10.5 to 12.5 s (ThabangVision routes on `next dev`), state there 0.9 s later |
+| Alice's edit to Bob / Bob's edit to Alice's review | 0.25 to 1.2 s / 0.26 to 0.52 s |
+| People | display names only; no email in any answer |
+| Bob leaves; invited again and joins; removed | off his computer and the log; joins again; refused |
+| Silent renewal | new certificate in 6.4 s after start, same device, online throughout |
+| Computer unlinked on the website | signs itself out at the next renewal, "This computer was unlinked from ThabangVision. Sign in again." |
+| Sign out, sign in again | same device id, project kept |
+
+Regressions: kopano-node 52 of 52 (13 new), kopano-core 10 + 3, S1 20 of 20 edits (median
+424 ms), both ways, concurrent edits settle, restart catch-up.
+
+**Open**
+
+- A revoked computer's certificate stays valid at peers until it expires (up to 30 days): there
+  is no revocation list yet (desktop-api.md section 4). The owner's computer could sign a device
+  block from 3h's list, but a block is permanent in the log and the same computer would stay
+  blocked after linking again; needs an unblock entry or a signed revocation list first.
+- The issuer key is trusted from the site's published list at sign-in (no key pinned in the app
+  yet; pin the production key when it exists).
+- Shared projects are "I approve changes" projects: a "live" project's members are fixed in its
+  genesis and cannot take invited people.
+- Join waits for an online computer of the owner (or an active member); there is no relay copy.

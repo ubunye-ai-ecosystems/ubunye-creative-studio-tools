@@ -28,7 +28,7 @@ TV = arg('--tv', 'http://localhost:3100').rstrip('/')
 BASE = int(arg('--port-base', 47500))
 if 'thabangvision.com' in TV:
     sys.exit('S9 runs against a dev server only')
-ENV = dict(l.split('=', 1) for l in open(arg('--env')).read().splitlines() if '=' in l and not l.startswith('#'))
+ENV = dict(l.split('=', 1) for l in open(arg('--env'), encoding='utf-8').read().splitlines() if '=' in l and not l.startswith('#'))
 SB, SK = ENV['NEXT_PUBLIC_SUPABASE_URL'].strip().strip('"'), ENV['SUPABASE_SERVICE_ROLE_KEY'].strip().strip('"')
 if 'bprargrqppufeuewryze' not in SB:
     sys.exit('S9 uses the DEV Supabase project only')
@@ -231,10 +231,13 @@ try:
     if ok:
         call('a', op='remove-person', project=pid, user=users['b']['id'])
         before = call('a', op='get', project=pid, key='photo-0000', field='develop.contrast')
-        call('b', op='set', project=pid, key='photo-0000', field='develop.contrast', value=77)
+        # his computer may already have the removal (pushed before the refusal): it then refuses
+        # the edit itself; either way nothing of his reaches Alice
+        ok_set, said = attempt('b', op='set', project=pid, key='photo-0000', field='develop.contrast', value=77)
         time.sleep(8)
         rv = call('a', op='review', project=pid)
-        check('removed_member_is_refused', not bobs(rv) and call('a', op='get', project=pid, key='photo-0000', field='develop.contrast') == before, rv)
+        check('removed_member_is_refused', not bobs(rv) and call('a', op='get', project=pid, key='photo-0000', field='develop.contrast') == before,
+              {'bob_edit_accepted_locally': ok_set, 'said': said, 'alice_pending': rv['pending']})
         ok2, msg2 = attempt('b', op='people', project=pid)
         check('removed_member_sees_project_not_found', not ok2, msg2)
 

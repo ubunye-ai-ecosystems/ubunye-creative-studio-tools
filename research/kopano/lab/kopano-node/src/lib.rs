@@ -439,6 +439,9 @@ pub struct Node {
     pub stop: tokio::sync::Notify,
     /// per shared project: when the owner's device last asked ThabangVision who is in it (share.rs)
     pub(crate) mirror_asked: std::sync::Mutex<HashMap<Id, Instant>>,
+    /// projects this person left while the service ran (share.rs): their files may still be open
+    /// in a connection that has not ended yet, so joining again takes this one back
+    pub(crate) left: std::sync::Mutex<HashMap<Id, Arc<Proj>>>,
 }
 
 impl Node {
@@ -461,7 +464,7 @@ impl Node {
                 }
             }
         }
-        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default(), media: Default::default(), boot: rand::random(), stop: Default::default(), mirror_asked: Default::default() }))
+        Ok(Arc::new(Self { device, projects: std::sync::RwLock::new(projects), events: broadcast::channel(1024).0, endpoint: Default::default(), media: Default::default(), boot: rand::random(), stop: Default::default(), mirror_asked: Default::default(), left: Default::default() }))
     }
 
     pub fn project(&self, id: &str) -> Result<Arc<Proj>> {
@@ -803,6 +806,18 @@ impl Node {
     pub async fn join(self: &Arc<Self>, pid: &str, from: &str, binding: Binding) -> Result<Arc<Proj>> {
         let id = Id::parse(pid)?;
         if let Ok(p) = self.project(pid) {
+            return Ok(p);
+        }
+        let back = self.left.lock().unwrap().remove(&id);
+        if let Some(p) = back {
+            // joining again after leaving: the owner's device decides at the next connection
+            p.gone.store(false, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::fs::remove_file(p.dir.join("left"));
+            p.rebind(binding)?;
+            p.add_peer(from)?;
+            self.projects.write().unwrap().insert(id, p.clone());
+            self.follow(p.clone(), from.to_string());
+            self.watch_app(p.clone());
             return Ok(p);
         }
         let ep = self.endpoint.get().context("not started")?.clone();

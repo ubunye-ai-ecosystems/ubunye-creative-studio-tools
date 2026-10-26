@@ -371,6 +371,7 @@ pub async fn leave(node: &Arc<Node>, which: &str) -> Result<Value> {
         }
         std::fs::write(p.dir.join("left"), now_ms().to_string())?;
         node.projects.write().unwrap().remove(&p.project.id);
+        node.left.lock().unwrap().insert(p.project.id, p.clone());
         node.emit(json!({"event": "left", "project": p.project.id.hex()}));
     }
     Ok(json!({"left": true}))

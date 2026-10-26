@@ -249,6 +249,11 @@ pub async fn renew_once(node: &Node, tv: &Tv) -> Result<bool> {
 
 /// Keep this computer's certificate fresh for as long as the service runs.
 pub async fn keep_fresh(node: Arc<Node>) {
+    // only a certificate ThabangVision issued is renewed there (lab certificates are not)
+    let issuers: Vec<String> = serde_json::from_slice(&std::fs::read(node.device.home.join("issuers.json")).unwrap_or_default()).unwrap_or_default();
+    if !issuers.contains(&node.device.cert.signer) {
+        return;
+    }
     let tv = match Tv::for_home(&node.device.home) {
         Ok(t) => t,
         Err(e) => return eprintln!("[kopanod] renewal off: {e:#}"),
