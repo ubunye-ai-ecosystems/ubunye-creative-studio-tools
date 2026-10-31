@@ -14,7 +14,7 @@
 //! (macOS), ~/.local/share/kopano (Linux); API port = KOPANO_API_PORT, else 47100.
 //!
 //! Signing in: `kopanod call --json '{"op":"sign-in"}'` (what the apps' button does; API.md).
-//! ThabangVision's address: KOPANO_TV_URL, else <home>/server.json, else the local test server
+//! ThabangVision's address: KOPANO_TV_URL, else <home>/server.json, else the live site
 //! (tv.rs).
 
 use anyhow::{bail, Context, Result};

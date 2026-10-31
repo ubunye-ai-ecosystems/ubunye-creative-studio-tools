@@ -16,9 +16,8 @@ Error sentences are plain English for the person, never protocol words, never em
 Home folder: `KOPANO_HOME`, else `%LOCALAPPDATA%\Kopano` (Windows), `~/Library/Application
 Support/Kopano` (macOS), `~/.local/share/kopano` (Linux).
 
-ThabangVision's address: `KOPANO_TV_URL`, else `<home>/server.json` `{"url": "..."}`, else the local
-test server `http://localhost:3100`. The production site is refused unless
-`KOPANO_TV_PRODUCTION=1` (it waits for the `kopano` flag and the owner's approval). The contract
+ThabangVision's address: `KOPANO_TV_URL`, else `<home>/server.json` `{"url": "..."}`, else the live
+site `https://www.thabangvision.com`. Tests and dev runs set `http://localhost:3100`. The contract
 kopanod follows is `docs/kopano/desktop-api.md` in the ThabangVision repo.
 
 ## 1. Signed in or not

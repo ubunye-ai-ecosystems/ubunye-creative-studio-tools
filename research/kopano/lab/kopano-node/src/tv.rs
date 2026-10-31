@@ -6,9 +6,8 @@
 //! mirror (find and invite people, "Shared with me"). Who may edit a project is decided by the
 //! project's signed members log (approve.rs), never by an answer from here.
 //!
-//! Base URL: `KOPANO_TV_URL`, else `<home>/server.json` `{"url": ...}`, else the local dev server.
-//! The production site is refused unless `KOPANO_TV_PRODUCTION=1` (it stays behind the `kopano`
-//! flag until the owner approves).
+//! Base URL: `KOPANO_TV_URL`, else `<home>/server.json` `{"url": ...}`, else the live site
+//! (owner approved 2026-10-31). Tests and dev runs point at `http://localhost:3100` with either.
 
 use anyhow::{anyhow, bail, Context, Result};
 use kopano_core::identity::{now_ms, DeviceKey};
@@ -17,8 +16,8 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
 
-/// A local `next dev` of ThabangVision on the DEV database (desktop-api.md, "Base URL").
-pub const DEFAULT_URL: &str = "http://localhost:3100";
+/// The live ThabangVision site (desktop-api.md, "Base URL").
+pub const DEFAULT_URL: &str = "https://www.thabangvision.com";
 
 pub fn base_url(home: &Path) -> Result<String> {
     let url = std::env::var("KOPANO_TV_URL")
@@ -26,11 +25,7 @@ pub fn base_url(home: &Path) -> Result<String> {
         .filter(|u| !u.is_empty())
         .or_else(|| std::fs::read(home.join("server.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["url"].as_str().map(String::from)))
         .unwrap_or_else(|| DEFAULT_URL.to_string());
-    let url = url.trim_end_matches('/').to_string();
-    if url.contains("thabangvision.com") && std::env::var("KOPANO_TV_PRODUCTION").as_deref() != Ok("1") {
-        bail!("this build signs in on the test site only");
-    }
-    Ok(url)
+    Ok(url.trim_end_matches('/').to_string())
 }
 
 pub fn sha256_hex(b: &[u8]) -> String {
@@ -224,12 +219,11 @@ mod tests {
     }
 
     #[test]
-    fn the_production_site_needs_a_deliberate_switch() {
+    fn the_live_site_unless_told_otherwise() {
         let d = std::env::temp_dir().join(format!("kopano-tv-url-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("server.json"), br#"{"url": "https://thabangvision.com/"}"#).unwrap();
-        if std::env::var_os("KOPANO_TV_URL").is_none() && std::env::var_os("KOPANO_TV_PRODUCTION").is_none() {
-            assert!(base_url(&d).is_err());
+        if std::env::var_os("KOPANO_TV_URL").is_none() {
+            assert_eq!(base_url(&d).unwrap(), "https://www.thabangvision.com");
             std::fs::write(d.join("server.json"), br#"{"url": "http://localhost:3100/"}"#).unwrap();
             assert_eq!(base_url(&d).unwrap(), "http://localhost:3100");
         }
